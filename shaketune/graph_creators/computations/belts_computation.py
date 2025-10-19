@@ -9,7 +9,6 @@
 from typing import Any, List, NamedTuple, Optional, Tuple
 
 import numpy as np
-from scipy.stats import pearsonr
 
 from ...helpers.accelerometer import Measurement
 from ...helpers.common_func import detect_peaks
@@ -96,7 +95,7 @@ class BeltsComputation:
         similarity_factor = None
         mhi = None
         if self.kinematics in {'limited_corexy', 'corexy', 'limited_corexz', 'corexz'}:
-            correlation, _ = pearsonr(signal1.psd, signal2.psd)
+            correlation = np.corrcoef(signal1.psd, signal2.psd)[0][-1]
             similarity_factor = correlation * 100
             similarity_factor = np.clip(similarity_factor, 0, 100)
             ConsoleOutput.print(f'Belts estimated similarity: {similarity_factor:.1f}%')
