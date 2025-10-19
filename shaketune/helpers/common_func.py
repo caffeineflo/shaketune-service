@@ -15,7 +15,6 @@ from importlib import import_module
 from pathlib import Path
 
 import numpy as np
-from scipy.signal import spectrogram
 
 # Constant used to define the standard axis direction and names
 AXIS_CONFIG = [
@@ -55,27 +54,6 @@ def get_git_version():
 
     except Exception:
         return None
-
-
-# This is Klipper's spectrogram generation function adapted to use Scipy
-def compute_spectrogram(data):
-    N = data.shape[0]
-    Fs = N / (data[-1, 0] - data[0, 0])
-    # Round up to a power of 2 for faster FFT
-    M = 1 << int(0.5 * Fs - 1).bit_length()
-    window = np.kaiser(M, 6.0)
-
-    def _specgram(x):
-        return spectrogram(
-            x, fs=Fs, window=window, nperseg=M, noverlap=M // 2, detrend='constant', scaling='density', mode='psd'
-        )
-
-    d = {'x': data[:, 1], 'y': data[:, 2], 'z': data[:, 3]}
-    f, t, pdata = _specgram(d['x'])
-    for axis in 'yz':
-        pdata += _specgram(d[axis])[2]
-    return pdata, t, f
-
 
 # Compute natural resonant frequency and damping ratio by using the half power bandwidth method with interpolated frequencies
 def compute_mechanical_parameters(psd, freqs, min_freq=None):

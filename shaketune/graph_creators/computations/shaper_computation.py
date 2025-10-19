@@ -11,8 +11,9 @@ from typing import Any, List, Optional
 import numpy as np
 
 from ...helpers.accelerometer import Measurement
-from ...helpers.common_func import compute_mechanical_parameters, compute_spectrogram, detect_peaks
+from ...helpers.common_func import compute_mechanical_parameters, detect_peaks
 from ...helpers.console_output import ConsoleOutput
+from ...helpers.spectrogram import compute_spectrogram
 from .. import get_shaper_calibrate_module
 from ..base_models import GraphMetadata
 from ..computation_results import ShaperResult
