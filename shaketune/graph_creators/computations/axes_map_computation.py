@@ -10,7 +10,7 @@ from typing import List, Tuple
 
 import numpy as np
 import pywt
-from scipy import stats
+from numpy.polynomial.polynomial import Polynomial
 
 from ...helpers.accelerometer import Measurement
 from ...helpers.console_output import ConsoleOutput
@@ -232,9 +232,9 @@ class AxesMapComputation:
 
         # Compute the direction vector using linear regression over the position data
         time = np.arange(len(position_x))
-        slope_x, intercept_x, _, _, _ = stats.linregress(time, position_x)
-        slope_y, intercept_y, _, _, _ = stats.linregress(time, position_y)
-        slope_z, intercept_z, _, _, _ = stats.linregress(time, position_z)
+        intercept_x, slope_x, *_ = Polynomial.fit(time, position_x, 1).convert()
+        intercept_y, slope_y, *_ = Polynomial.fit(time, position_y, 1).convert()
+        intercept_z, slope_z, *_ = Polynomial.fit(time, position_z, 1).convert()
 
         end_position = np.array(
             [slope_x * time[-1] + intercept_x, slope_y * time[-1] + intercept_y, slope_z * time[-1] + intercept_z]
