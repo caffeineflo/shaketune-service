@@ -9,13 +9,9 @@
 
 
 import math
-import os
-import sys
-from importlib import import_module
 from pathlib import Path
 
 import numpy as np
-from scipy.signal import spectrogram
 
 # Constant used to define the standard axis direction and names
 AXIS_CONFIG = [
@@ -26,13 +22,6 @@ AXIS_CONFIG = [
     {'axis': 'corexz_x', 'direction': (1, 0, 1), 'label': 'belt_X'},
     {'axis': 'corexz_z', 'direction': (-1, 0, 1), 'label': 'belt_Z'},
 ]
-
-
-# TODO: remove this function when the refactoring is finished
-def setup_klipper_import(kdir):
-    kdir = os.path.expanduser(kdir)
-    sys.path.append(os.path.join(kdir, 'klippy'))
-    return import_module('.shaper_calibrate', 'extras')
 
 
 # This is used to print the current S&T version on top of the png graph file
@@ -57,23 +46,66 @@ def get_git_version():
         return None
 
 
-# This is Klipper's spectrogram generation function adapted to use Scipy
 def compute_spectrogram(data):
     N = data.shape[0]
+    if N < 2:
+        raise ValueError('Not enough data samples')
+
+    # Sampling frequency
     Fs = N / (data[-1, 0] - data[0, 0])
+
     # Round up to a power of 2 for faster FFT
-    M = 1 << int(0.5 * Fs - 1).bit_length()
-    window = np.kaiser(M, 6.0)
+    nperseg = 1 << int(0.5 * Fs - 1).bit_length()
+    noverlap = nperseg // 2
 
-    def _specgram(x):
-        return spectrogram(
-            x, fs=Fs, window=window, nperseg=M, noverlap=M // 2, detrend='constant', scaling='density', mode='psd'
-        )
+    # Guard against data too short to form one full segment
+    if N < nperseg:
+        raise ValueError(f'Input data too short for nperseg={nperseg}')
 
-    d = {'x': data[:, 1], 'y': data[:, 2], 'z': data[:, 3]}
-    f, t, pdata = _specgram(d['x'])
-    for axis in 'yz':
-        pdata += _specgram(d[axis])[2]
+    window = np.kaiser(nperseg, 6.0)
+
+    # Step between segments and number of segments
+    step = nperseg - noverlap
+    n_segments = 1 + (N - nperseg) // step
+    n_freqs = nperseg // 2 + 1
+
+    # Time and frequency arrays
+    t = np.arange(n_segments) * step / Fs + nperseg / (2 * Fs)
+    f = np.fft.rfftfreq(nperseg, 1 / Fs)
+
+    # Output PSD accumulator
+    pdata = np.zeros((n_freqs, n_segments))
+    window_norm = 1.0 / (Fs * (window**2).sum())
+
+    # Process each axis (x, y, z)
+    segment_buffer = np.empty(nperseg)
+    for axis_idx in (1, 2, 3):
+        axis_data = data[:, axis_idx]
+
+        for i in range(n_segments):
+            start = i * step
+            end = start + nperseg
+
+            # Load each segment into the buffer and detrend in-place
+            np.copyto(segment_buffer, axis_data[start:end])
+            segment_buffer -= segment_buffer.mean()
+
+            # Apply window function and compute the FFT
+            segment_buffer *= window
+            fft_result = np.fft.rfft(segment_buffer, n=nperseg)
+
+            # Compute the power spectral density
+            psd = np.abs(fft_result) ** 2
+            psd *= window_norm
+
+            # Double for one-sided spectrum (except for DC and Nyquist)
+            if nperseg % 2 == 0:
+                psd[1:-1] *= 2
+            else:
+                psd[1:] *= 2
+
+            pdata[:, i] += psd
+
     return pdata, t, f
 
 

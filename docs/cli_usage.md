@@ -7,7 +7,7 @@ Shake&Tune includes a command-line interface (CLI) that allows you to generate g
 The CLI mode uses the same dependencies as the main Shake&Tune plugin. Ensure you have:
 
 - Python 3.9 or newer
-- Required Python packages: `numpy`, `matplotlib`, `scipy`, `zstandard`
+- Required Python packages: `numpy`, `matplotlib`, `zstandard`
 - The Klipper repository cloned locally in your home folder (no need to install it, just clone it)
 
 You can install these dependencies using:
