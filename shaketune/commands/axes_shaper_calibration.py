@@ -8,23 +8,32 @@
 #              The script performs resonance tests along specified axes, starts and stops measurements,
 #              and generates graphs for each axis to analyze the collected data.
 
+from datetime import datetime
 
+from ..helpers.accelerometer import Accelerometer, MeasurementsManager
 from ..helpers.common_func import AXIS_CONFIG
+from ..helpers.compat import KlipperCompatibility
 from ..helpers.console_output import ConsoleOutput
 from ..helpers.resonance_test import vibrate_axis
 from ..shaketune_process import ShakeTuneProcess
-from .accelerometer import Accelerometer
 
 
-def axes_shaper_calibration(gcmd, config, st_process: ShakeTuneProcess) -> None:
-    printer = config.get_printer()
+def axes_shaper_calibration(gcmd, klipper_config, st_process: ShakeTuneProcess) -> None:
+    date = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    printer = klipper_config.get_printer()
     toolhead = printer.lookup_object('toolhead')
     res_tester = printer.lookup_object('resonance_tester')
     systime = printer.get_reactor().monotonic()
     toolhead_info = toolhead.get_status(systime)
 
-    min_freq = gcmd.get_float('FREQ_START', default=res_tester.test.min_freq, minval=1)
-    max_freq = gcmd.get_float('FREQ_END', default=res_tester.test.max_freq, minval=1)
+    # Get the default values for the frequency range and the acceleration per Hz
+    compat = KlipperCompatibility(klipper_config)
+    res_config = compat.get_res_tester_config()
+    default_min_freq, default_max_freq, default_accel_per_hz, test_points = res_config
+
+    min_freq = gcmd.get_float('FREQ_START', default=default_min_freq, minval=1)
+    max_freq = gcmd.get_float('FREQ_END', default=default_max_freq, minval=1)
     hz_per_sec = gcmd.get_float('HZ_PER_SEC', default=1, minval=1)
     accel_per_hz = gcmd.get_float('ACCEL_PER_HZ', default=None)
     axis_input = gcmd.get('AXIS', default='all').lower()
@@ -34,19 +43,22 @@ def axes_shaper_calibration(gcmd, config, st_process: ShakeTuneProcess) -> None:
     max_sm = gcmd.get_float('MAX_SMOOTHING', default=None, minval=0)
     feedrate_travel = gcmd.get_float('TRAVEL_SPEED', default=120.0, minval=20.0)
     z_height = gcmd.get_float('Z_HEIGHT', default=None, minval=1)
+    max_scale = gcmd.get_int('MAX_SCALE', default=None, minval=1)
+    accel_chip = gcmd.get('ACCEL_CHIP', default=None)
 
     if accel_per_hz == '':
         accel_per_hz = None
+    if accel_chip == '':
+        accel_chip = None
 
     if accel_per_hz is None:
-        accel_per_hz = res_tester.test.accel_per_hz
+        accel_per_hz = default_accel_per_hz
 
     gcode = printer.lookup_object('gcode')
 
     max_accel = max_freq * accel_per_hz
 
     # Move to the starting point
-    test_points = res_tester.test.get_start_test_points()
     if len(test_points) > 1:
         raise gcmd.error('Only one test point in the [resonance_tester] section is supported by Shake&Tune.')
     if test_points[0] == (-1, -1, -1):
@@ -66,13 +78,6 @@ def axes_shaper_calibration(gcmd, config, st_process: ShakeTuneProcess) -> None:
             z = z_height
         point = (x, y, z)
 
-    toolhead.manual_move(point, feedrate_travel)
-    toolhead.dwell(0.5)
-
-    # Configure the graph creator
-    creator = st_process.get_graph_creator()
-    creator.configure(scv, max_sm, accel_per_hz)
-
     # set the needed acceleration values for the test
     toolhead_info = toolhead.get_status(systime)
     old_accel = toolhead_info['max_accel']
@@ -90,31 +95,60 @@ def axes_shaper_calibration(gcmd, config, st_process: ShakeTuneProcess) -> None:
     else:
         input_shaper = None
 
+    creator = st_process.get_graph_creator()
+
     # Filter axis configurations based on user input, assuming 'axis_input' can be 'x', 'y', 'all' (that means 'x' and 'y')
     filtered_config = [
         a for a in AXIS_CONFIG if a['axis'] == axis_input or (axis_input == 'all' and a['axis'] in ('x', 'y'))
     ]
     for config in filtered_config:
-        # First we need to find the accelerometer chip suited for the axis
-        accel_chip = Accelerometer.find_axis_accelerometer(printer, config['axis'])
-        if accel_chip is None:
+        filename = creator.get_folder() / f'{creator.get_type().replace(" ", "")}_{date}_{config["label"]}'
+        measurements_manager = MeasurementsManager(
+            st_process.get_st_config().chunk_size, printer.get_reactor(), filename
+        )
+
+        toolhead.manual_move(point, feedrate_travel)
+        toolhead.dwell(0.5)
+        toolhead.wait_moves()
+
+        # First we need to find the accelerometer chip suited for the axis (if not provided by the user)
+        current_accel_chip = accel_chip  # Use manually specified chip if provided
+        if current_accel_chip is None:
+            current_accel_chip = Accelerometer.find_axis_accelerometer(printer, config['axis'])
+        if current_accel_chip is None:
             raise gcmd.error('No suitable accelerometer found for measurement!')
-        accelerometer = Accelerometer(printer.get_reactor(), printer.lookup_object(accel_chip))
+        k_accelerometer = printer.lookup_object(current_accel_chip, None)
+        if k_accelerometer is None:
+            raise gcmd.error(f'Accelerometer chip "{current_accel_chip}" not found!')
+        accelerometer = Accelerometer(k_accelerometer, printer.get_reactor())
 
         # Then do the actual measurements
-        accelerometer.start_measurement()
-        vibrate_axis(toolhead, gcode, config['direction'], min_freq, max_freq, hz_per_sec, accel_per_hz)
-        accelerometer.stop_measurement(config['label'], append_time=True)
-
-        accelerometer.wait_for_file_writes()
+        ConsoleOutput.print(f'Measuring {config["label"]}...')
+        accelerometer.start_recording(measurements_manager, name=config['label'], append_time=True)
+        test_params = vibrate_axis(
+            toolhead,
+            gcode,
+            config['direction'],
+            min_freq,
+            max_freq,
+            hz_per_sec,
+            accel_per_hz,
+            res_tester,
+            klipper_config,
+        )
+        accelerometer.stop_recording()
+        toolhead.dwell(0.5)
+        toolhead.wait_moves()
 
         # And finally generate the graph for each measured axis
         ConsoleOutput.print(f'{config["axis"].upper()} axis frequency profile generation...')
         ConsoleOutput.print('This may take some time (1-3min)')
-        st_process.run()
+        creator.configure(scv, max_sm, test_params, max_scale)
+        creator.define_output_target(filename)
+        measurements_manager.save_stdata()
+        st_process.run(filename)
         st_process.wait_for_completion()
         toolhead.dwell(1)
-        toolhead.wait_moves()
 
     # Re-enable the input shaper if it was active
     if input_shaper is not None:

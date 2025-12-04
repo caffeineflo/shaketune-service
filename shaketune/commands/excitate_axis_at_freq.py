@@ -7,17 +7,21 @@
 # Description: Provide a command to excites a specified axis at a given frequency for a duration
 #              and optionally creates a graph of the vibration data collected by the accelerometer.
 
+from datetime import datetime
 
+from ..helpers.accelerometer import Accelerometer, MeasurementsManager
 from ..helpers.common_func import AXIS_CONFIG
+from ..helpers.compat import KlipperCompatibility
 from ..helpers.console_output import ConsoleOutput
 from ..helpers.resonance_test import vibrate_axis_at_static_freq
 from ..shaketune_process import ShakeTuneProcess
-from .accelerometer import Accelerometer
 
 
-def excitate_axis_at_freq(gcmd, config, st_process: ShakeTuneProcess) -> None:
+def excitate_axis_at_freq(gcmd, klipper_config, st_process: ShakeTuneProcess) -> None:
+    date = datetime.now().strftime('%Y%m%d_%H%M%S')
+
     create_graph = gcmd.get_int('CREATE_GRAPH', default=0, minval=0, maxval=1) == 1
-    freq = gcmd.get_int('FREQUENCY', default=25, minval=1)
+    freq = gcmd.get_float('FREQUENCY', default=25, minval=1)
     duration = gcmd.get_int('DURATION', default=30, minval=1)
     accel_per_hz = gcmd.get_float('ACCEL_PER_HZ', default=None)
     axis = gcmd.get('AXIS', default='x').lower()
@@ -35,27 +39,36 @@ def excitate_axis_at_freq(gcmd, config, st_process: ShakeTuneProcess) -> None:
         raise gcmd.error('AXIS selection invalid. Should be either x, y, a or b!')
 
     if create_graph:
-        printer = config.get_printer()
+        printer = klipper_config.get_printer()
         if accel_chip is None:
             accel_chip = Accelerometer.find_axis_accelerometer(printer, 'xy' if axis in {'a', 'b'} else axis)
         k_accelerometer = printer.lookup_object(accel_chip, None)
         if k_accelerometer is None:
             raise gcmd.error(f'Accelerometer chip [{accel_chip}] was not found!')
-        accelerometer = Accelerometer(printer.get_reactor(), k_accelerometer)
+        accelerometer = Accelerometer(k_accelerometer, printer.get_reactor())
 
-    ConsoleOutput.print(f'Excitating {axis.upper()} axis at {freq}Hz for {duration} seconds')
+        creator = st_process.get_graph_creator()
+        filename = creator.get_folder() / f'{creator.get_type().replace(" ", "")}_{date}'
+        measurements_manager = MeasurementsManager(
+            st_process.get_st_config().chunk_size, printer.get_reactor(), filename
+        )
 
-    printer = config.get_printer()
+    ConsoleOutput.print(f'Excitating {axis.upper()} axis at {freq:.1f}Hz for {duration} seconds')
+
+    printer = klipper_config.get_printer()
     gcode = printer.lookup_object('gcode')
     toolhead = printer.lookup_object('toolhead')
-    res_tester = printer.lookup_object('resonance_tester')
     systime = printer.get_reactor().monotonic()
 
+    # Get the default values for the acceleration per Hz and the test points
+    compat = KlipperCompatibility(klipper_config)
+    res_config = compat.get_res_tester_config()
+    default_min_freq, default_max_freq, default_accel_per_hz, test_points = res_config
+
     if accel_per_hz is None:
-        accel_per_hz = res_tester.test.accel_per_hz
+        accel_per_hz = default_accel_per_hz
 
     # Move to the starting point
-    test_points = res_tester.test.get_start_test_points()
     if len(test_points) > 1:
         raise gcmd.error('Only one test point in the [resonance_tester] section is supported by Shake&Tune.')
     if test_points[0] == (-1, -1, -1):
@@ -87,10 +100,10 @@ def excitate_axis_at_freq(gcmd, config, st_process: ShakeTuneProcess) -> None:
 
     # If the user want to create a graph, we start accelerometer recording
     if create_graph:
-        accelerometer.start_measurement()
+        accelerometer.start_recording(measurements_manager, name=f'staticfreq_{axis.upper()}', append_time=True)
 
     toolhead.dwell(0.5)
-    vibrate_axis_at_static_freq(toolhead, gcode, axis_config['direction'], freq, duration, accel_per_hz)
+    vibrate_axis_at_static_freq(toolhead, gcode, axis_config['direction'], freq, duration, accel_per_hz, klipper_config)
     toolhead.dwell(0.5)
 
     # Re-enable the input shaper if it was active
@@ -99,10 +112,11 @@ def excitate_axis_at_freq(gcmd, config, st_process: ShakeTuneProcess) -> None:
 
     # If the user wanted to create a graph, we stop the recording and generate it
     if create_graph:
-        accelerometer.stop_measurement(f'staticfreq_{axis.upper()}', append_time=True)
-        accelerometer.wait_for_file_writes()
+        accelerometer.stop_recording()
+        toolhead.dwell(0.5)
 
-        creator = st_process.get_graph_creator()
         creator.configure(freq, duration, accel_per_hz)
-        st_process.run()
+        creator.define_output_target(filename)
+        measurements_manager.save_stdata()
+        st_process.run(filename)
         st_process.wait_for_completion()

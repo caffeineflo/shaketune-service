@@ -4,81 +4,97 @@
 # Licensed under the GNU General Public License v3.0 (GPL-3.0)
 #
 # File: graph_creator.py
-# Description: Abstract base class for creating various types of graphs in Shake&Tune,
-#              including methods for moving, preparing, saving, and cleaning up files.
-#              This class is inherited by the AxesMapGraphCreator, BeltsGraphCreator,
-#              ShaperGraphCreator, VibrationsGraphCreator, StaticGraphCreator
+# Description: Base class for creating graphs using composition-based architecture
 
 
 import abc
-import shutil
-from datetime import datetime
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Optional, Type
 
 from matplotlib.figure import Figure
 
+from ..helpers.accelerometer import MeasurementsManager
 from ..shaketune_config import ShakeTuneConfig
+from .base_models import Computation, PlotterStrategy
 
 
 class GraphCreator(abc.ABC):
-    def __init__(self, config: ShakeTuneConfig, graph_type: str):
+    """Base class for graph creators using composition-based architecture"""
+
+    registry = {}
+
+    @classmethod
+    def register(cls, graph_type: str):
+        """Decorator to register graph creator subclasses"""
+
+        def decorator(subclass):
+            cls.registry[graph_type] = subclass
+            subclass.graph_type = graph_type
+            return subclass
+
+        return decorator
+
+    def __init__(
+        self, config: ShakeTuneConfig, computation_class: Type[Computation], plotter_class: Type[PlotterStrategy]
+    ):
         self._config = config
-        self._graph_date = datetime.now().strftime('%Y%m%d_%H%M%S')
         self._version = ShakeTuneConfig.get_git_version()
-        self._type = graph_type
-        self._folder = self._config.get_results_folder(graph_type)
+        self._type = self.__class__.graph_type
+        self._folder = self._config.get_results_folder(self._type)
+        self._output_target: Optional[Path] = None
 
-    def _move_and_prepare_files(
-        self,
-        glob_pattern: str,
-        min_files_required: Optional[int] = None,
-        custom_name_func: Optional[Callable[[Path], str]] = None,
-    ) -> List[Path]:
-        tmp_path = Path('/tmp')
-        globbed_files = list(tmp_path.glob(glob_pattern))
+        self._computation_class = computation_class
+        self._plotter = plotter_class()
 
-        # If min_files_required is not set, use the number of globbed files as the minimum
-        min_files_required = min_files_required or len(globbed_files)
+    @abc.abstractmethod
+    def configure(self, **kwargs) -> None:
+        """Configure the graph creator with specific parameters"""
+        pass
 
-        if not globbed_files:
-            raise FileNotFoundError(f'no CSV files found in the /tmp folder to create the {self._type} graphs!')
-        if len(globbed_files) < min_files_required:
-            raise FileNotFoundError(f'{min_files_required} CSV files are needed to create the {self._type} graphs!')
+    @abc.abstractmethod
+    def _create_computation(self, measurements_manager: MeasurementsManager) -> Computation:
+        """Create the computation instance with proper configuration"""
+        pass
 
-        lognames = []
-        for filename in sorted(globbed_files, key=lambda f: f.stat().st_mtime, reverse=True)[:min_files_required]:
-            custom_name = custom_name_func(filename) if custom_name_func else filename.name
-            new_file = self._folder / f"{self._type.replace(' ', '')}_{self._graph_date}_{custom_name}.csv"
-            # shutil.move() is needed to move the file across filesystems (mainly for BTT CB1 Pi default OS image)
-            shutil.move(filename, new_file)
-            lognames.append(new_file)
-        return lognames
+    def create_graph(self, measurements_manager: MeasurementsManager) -> None:
+        """Create and save the graph"""
+        computation = self._create_computation(measurements_manager)
+        result = computation.compute()
+        fig = self._plotter.plot(result)
+        self._save_figure(fig)
 
-    def _save_figure_and_cleanup(self, fig: Figure, lognames: List[Path], axis_label: Optional[str] = None) -> None:
-        axis_suffix = f'_{axis_label}' if axis_label else ''
-        png_filename = self._folder / f"{self._type.replace(' ', '')}_{self._graph_date}{axis_suffix}.png"
-        fig.savefig(png_filename, dpi=self._config.dpi)
+    def _save_figure(self, fig: Figure) -> None:
+        """Save the figure to disk"""
+        if self._output_target is None:
+            raise ValueError(
+                'Output target not defined. Please call define_output_target() before trying to save the figure!'
+            )
 
-        if self._config.keep_csv:
-            self._archive_files(lognames)
-        else:
-            self._remove_files(lognames)
-
-    def _archive_files(self, lognames: List[Path]) -> None:
-        return
-
-    def _remove_files(self, lognames: List[Path]) -> None:
-        for csv in lognames:
-            csv.unlink(missing_ok=True)
+        fig.savefig(f'{self._output_target.with_suffix(".png")}', dpi=self._config.dpi)
+        if not self._config.keep_raw_data:
+            self._output_target.with_suffix('.stdata').unlink(missing_ok=True)
 
     def get_type(self) -> str:
+        """Get the graph type"""
         return self._type
 
-    @abc.abstractmethod
-    def create_graph(self) -> None:
-        pass
+    def get_folder(self) -> Path:
+        """Get the output folder"""
+        return self._folder
 
-    @abc.abstractmethod
-    def clean_old_files(self, keep_results: int) -> None:
-        pass
+    def define_output_target(self, filepath: Path) -> None:
+        """Define the output file path"""
+        # Remove the extension if it exists (to be safer when using the CLI mode)
+        if filepath.suffix:
+            filepath = filepath.with_suffix('')
+        self._output_target = filepath
+
+    def clean_old_files(self, keep_results: int = 10) -> None:
+        """Clean old result files"""
+        files = sorted(self._folder.glob('*.png'), key=lambda f: f.stat().st_mtime, reverse=True)
+        if len(files) <= keep_results:
+            return  # No need to delete any files
+        for old_png_file in files[keep_results:]:
+            stdata_file = old_png_file.with_suffix('.stdata')
+            stdata_file.unlink(missing_ok=True)
+            old_png_file.unlink()

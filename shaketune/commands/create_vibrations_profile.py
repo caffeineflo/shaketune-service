@@ -10,16 +10,19 @@
 
 
 import math
+from datetime import datetime
 
+from ..helpers.accelerometer import Accelerometer, MeasurementsManager
 from ..helpers.console_output import ConsoleOutput
 from ..helpers.motors_config_parser import MotorsConfigParser
 from ..shaketune_process import ShakeTuneProcess
-from .accelerometer import Accelerometer
 
 MIN_SPEED = 2  # mm/s
 
 
 def create_vibrations_profile(gcmd, config, st_process: ShakeTuneProcess) -> None:
+    date = datetime.now().strftime('%Y%m%d_%H%M%S')
+
     size = gcmd.get_float('SIZE', default=100.0, minval=50.0)
     z_height = gcmd.get_float('Z_HEIGHT', default=20.0)
     max_speed = gcmd.get_float('MAX_SPEED', default=200.0, minval=10.0)
@@ -47,9 +50,9 @@ def create_vibrations_profile(gcmd, config, st_process: ShakeTuneProcess) -> Non
         raise gcmd.error('Input shaper is not configured! Please run the shaper calibration macro first.')
 
     motors_config_parser = MotorsConfigParser(config, motors=['stepper_x', 'stepper_y'])
-    if motors_config_parser.kinematics in {'cartesian', 'corexz'}:
+    if motors_config_parser.kinematics in {'cartesian', 'limited_cartesian', 'corexz', 'limited_corexz'}:
         main_angles = [0, 90]  # Cartesian motors are on X and Y axis directly, same for CoreXZ
-    elif motors_config_parser.kinematics == 'corexy':
+    elif motors_config_parser.kinematics in {'corexy', 'limited_corexy'}:
         main_angles = [45, 135]  # CoreXY motors are on A and B axis (45 and 135 degrees)
     else:
         raise gcmd.error(
@@ -81,6 +84,10 @@ def create_vibrations_profile(gcmd, config, st_process: ShakeTuneProcess) -> Non
     toolhead.move([mid_x - 15, mid_y - 15, z_height, E], feedrate_travel)
     toolhead.dwell(0.5)
 
+    creator = st_process.get_graph_creator()
+    filename = creator.get_folder() / f'{creator.get_type().replace(" ", "")}_{date}'
+    measurements_manager = MeasurementsManager(st_process.get_st_config().chunk_size, printer.get_reactor(), filename)
+
     nb_speed_samples = int((max_speed - MIN_SPEED) / speed_increment + 1)
     for curr_angle in main_angles:
         ConsoleOutput.print(f'-> Measuring angle: {curr_angle} degrees...')
@@ -97,7 +104,7 @@ def create_vibrations_profile(gcmd, config, st_process: ShakeTuneProcess) -> Non
         if k_accelerometer is None:
             raise gcmd.error(f'Accelerometer [{current_accel_chip}] not found!')
         ConsoleOutput.print(f'Accelerometer chip used for this angle: [{current_accel_chip}]')
-        accelerometer = Accelerometer(printer.get_reactor(), k_accelerometer)
+        accelerometer = Accelerometer(k_accelerometer, printer.get_reactor())
 
         # Sweep the speed range to record the vibrations at different speeds
         for curr_speed_sample in range(nb_speed_samples):
@@ -127,17 +134,15 @@ def create_vibrations_profile(gcmd, config, st_process: ShakeTuneProcess) -> Non
                 movements = 2
 
             # Back and forth movements to record the vibrations at constant speed in both direction
-            accelerometer.start_measurement()
+            name = f'vib_an{curr_angle:.2f}sp{curr_speed:.2f}'.replace('.', '_')
+            accelerometer.start_recording(measurements_manager, name=name, append_time=True)
             for _ in range(movements):
                 toolhead.move([mid_x + dX, mid_y + dY, z_height, E], curr_speed)
                 toolhead.move([mid_x - dX, mid_y - dY, z_height, E], curr_speed)
-            name = f'vib_an{curr_angle:.2f}sp{curr_speed:.2f}'.replace('.', '_')
-            accelerometer.stop_measurement(name)
+            accelerometer.stop_recording()
 
             toolhead.dwell(0.3)
             toolhead.wait_moves()
-
-        accelerometer.wait_for_file_writes()
 
         # Restore the previous acceleration values
     if old_mcr is not None:  # minimum_cruise_ratio found: Klipper >= v0.12.0-239
@@ -151,7 +156,8 @@ def create_vibrations_profile(gcmd, config, st_process: ShakeTuneProcess) -> Non
     # Run post-processing
     ConsoleOutput.print('Machine vibrations profile generation...')
     ConsoleOutput.print('This may take some time (5-8min)')
-    creator = st_process.get_graph_creator()
-    creator.configure(motors_config_parser.kinematics, accel, motors_config_parser)
-    st_process.run()
+    creator.configure(motors_config_parser.kinematics, accel, motors_config_parser.get_motors())
+    creator.define_output_target(filename)
+    measurements_manager.save_stdata()
+    st_process.run(filename)
     st_process.wait_for_completion()
