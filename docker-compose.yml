@@ -1,0 +1,15 @@
+services:
+  shaketune:
+    image: ghcr.io/caffeineflo/shaketune-service:latest
+    container_name: shaketune-service
+    ports:
+      - "8080:8080"
+    volumes:
+      - shaketune-results:/app/results
+    restart: unless-stopped
+    # Network mode: bridge (default) keeps it on local network only
+    # No ports are exposed externally unless you configure your router
+
+volumes:
+  shaketune-results:
+    driver: local
