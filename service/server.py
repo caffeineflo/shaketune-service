@@ -32,10 +32,11 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 app.mount("/results", StaticFiles(directory=RESULTS_DIR), name="results")
 
 
-def run_graph_script(script_name: str, csv_paths: List[str], output_path: str, extra_args: List[str] = None) -> bool:
-    """Run a Shake&Tune graph creator script."""
+def run_graph_cli(graph_type: str, csv_paths: List[str], output_path: str, extra_args: List[str] = None) -> bool:
+    """Run the Shake&Tune CLI to generate a graph."""
     cmd = [
-        "python", "-m", f"shaketune.graph_creators.{script_name}",
+        "python", "-m", "shaketune.cli",
+        graph_type,
         "-k", KLIPPER_DIR,
         "-o", output_path,
     ]
@@ -86,8 +87,8 @@ async def analyze_shaper(
         csv_paths = await save_uploaded_files(files, tmpdir)
         output_png = os.path.join(tmpdir, "shaper.png")
 
-        extra_args = ["-f", str(max_freq), "--scv", str(scv)]
-        run_graph_script("shaper_graph_creator", csv_paths, output_png, extra_args)
+        extra_args = ["--max_freq", str(max_freq), "--scv", str(scv)]
+        run_graph_cli("input_shaper", csv_paths, output_png, extra_args)
 
         final_name = f"{timestamp}_{job_id}_shaper.png"
         final_path = os.path.join(RESULTS_DIR, final_name)
@@ -114,8 +115,8 @@ async def analyze_belts(
         csv_paths = await save_uploaded_files(files, tmpdir)
         output_png = os.path.join(tmpdir, "belts.png")
 
-        extra_args = ["-f", str(max_freq)]
-        run_graph_script("belts_graph_creator", csv_paths, output_png, extra_args)
+        extra_args = ["--max_freq", str(max_freq)]
+        run_graph_cli("belts", csv_paths, output_png, extra_args)
 
         final_name = f"{timestamp}_{job_id}_belts.png"
         final_path = os.path.join(RESULTS_DIR, final_name)
@@ -127,7 +128,7 @@ async def analyze_belts(
 @app.post("/vibrations")
 async def analyze_vibrations(
     files: List[UploadFile] = File(...),
-    axis: Optional[str] = None,
+    kinematics: Optional[str] = "corexy",
     max_freq: Optional[float] = 1000.0
 ):
     """
@@ -143,10 +144,8 @@ async def analyze_vibrations(
         csv_paths = await save_uploaded_files(files, tmpdir)
         output_png = os.path.join(tmpdir, "vibrations.png")
 
-        extra_args = ["-f", str(max_freq)]
-        if axis:
-            extra_args.extend(["-a", axis])
-        run_graph_script("vibrations_graph_creator", csv_paths, output_png, extra_args)
+        extra_args = ["--max_freq", str(max_freq), "--kinematics", kinematics]
+        run_graph_cli("vibrations", csv_paths, output_png, extra_args)
 
         final_name = f"{timestamp}_{job_id}_vibrations.png"
         final_path = os.path.join(RESULTS_DIR, final_name)
