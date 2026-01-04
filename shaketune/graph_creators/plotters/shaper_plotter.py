@@ -11,6 +11,7 @@ from typing import Any, Dict
 
 import matplotlib
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.figure import Figure
 
 from ..base_models import PlotterStrategy
@@ -129,15 +130,22 @@ class ShaperPlotter(PlotterStrategy):
         ax_2 = ax.twinx()
         ax_2.yaxis.set_visible(False)
         for shaper in data['shapers']:
-            ax_2.plot(freqs, shaper.vals, label=shaper.name.upper(), linestyle='dotted')
+            # New Klipper has freq_bins in CalibrationResult, use it if available
+            shaper_freqs = shaper.freq_bins if hasattr(shaper, 'freq_bins') and shaper.freq_bins is not None else freqs
+            ax_2.plot(shaper_freqs, shaper.vals, label=shaper.name.upper(), linestyle='dotted')
 
         # Draw shaper filtered PSDs
         shaper_choices = data['shaper_choices']
         for shaper in data['shaper_table_data']['shapers']:
+            # Interpolate vals to match calibration_data.freqs if freq_bins is different (new Klipper API)
+            if shaper['freq_bins'] is not None:
+                interp_vals = np.interp(freqs, shaper['freq_bins'], shaper['vals'])
+            else:
+                interp_vals = shaper['vals']
             if shaper['type'] == shaper_choices[0]:
-                ax.plot(freqs, psd * shaper['vals'], label=f'With {shaper_choices[0]} applied', color='cyan')
+                ax.plot(freqs, psd * interp_vals, label=f'With {shaper_choices[0]} applied', color='cyan')
             if len(shaper_choices) > 1 and shaper['type'] == shaper_choices[1]:
-                ax.plot(freqs, psd * shaper['vals'], label=f'With {shaper_choices[1]} applied', color='lime')
+                ax.plot(freqs, psd * interp_vals, label=f'With {shaper_choices[1]} applied', color='lime')
 
         # Draw detected peaks
         peaks = data['peaks']
