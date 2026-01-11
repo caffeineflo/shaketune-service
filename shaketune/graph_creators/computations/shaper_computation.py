@@ -105,11 +105,12 @@ class ShaperComputation:
         max_smoothing_computed = 0
         for shaper in k_shapers:
             if hasattr(shaper, 'freq_bins') and shaper.freq_bins is not None:
-                # New Klipper (Dec 2025+): shaper has its own freq_bins, resample to filtered freqs
+                # New Klipper (Oct 2025+): shaper has its own freq_bins, resample to filtered freqs
                 vals_resampled = np.interp(calibration_data.freqs, shaper.freq_bins, shaper.vals)
             else:
-                # Older Klipper: vals matches calibration_data.freq_bins, just filter it
-                vals_resampled = shaper.vals[freqs <= self.max_freq]
+                # Older Klipper: vals is already filtered in fit_shaper to match freq_bins <= max_freq
+                # It should directly match calibration_data.freqs which was filtered the same way
+                vals_resampled = shaper.vals
 
             shaper_info = {
                 'type': shaper.name.upper(),
