@@ -11,7 +11,7 @@ from typing import List, Optional
 import numpy as np
 
 from ...helpers.accelerometer import Measurement
-from ...helpers.common_func import compute_spectrogram
+from ...helpers.spectrogram import compute_spectrogram
 from ...helpers.console_output import ConsoleOutput
 from ..base_models import GraphMetadata
 from ..computation_results import StaticFrequencyResult
