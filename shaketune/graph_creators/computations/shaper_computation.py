@@ -102,15 +102,19 @@ class ShaperComputation:
         perf_shaper_freq = None
         perf_shaper_accel = 0
         max_smoothing_computed = 0
+        # Get the filtered frequency range for interpolation
+        filtered_freqs = calibration_data.freqs
         for shaper in k_shapers:
+            # Interpolate shaper vals to match the filtered calibration frequencies
+            vals_interp = np.interp(filtered_freqs, shaper.freq_bins, shaper.vals)
             shaper_info = {
                 'type': shaper.name.upper(),
                 'frequency': shaper.freq,
                 'vibrations': shaper.vibrs,
                 'smoothing': shaper.smoothing,
                 'max_accel': shaper.max_accel,
-                'vals': shaper.vals,
-                'freq_bins': shaper.freq_bins,
+                'vals': vals_interp,  # Interpolated to match calibration freqs
+                'freq_bins': filtered_freqs,  # Use filtered freqs
             }
             shaper_table_data['shapers'].append(shaper_info)
             max_smoothing_computed = max(max_smoothing_computed, shaper.smoothing)
