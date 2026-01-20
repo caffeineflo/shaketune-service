@@ -78,7 +78,7 @@ command: sh /usr/data/printer_data/config/shaketune_belts_upload.sh
 timeout: 300.0
 verbose: True
 
-[gcode_macro SHAKETUNE_SHAPER]
+[gcode_macro SHAKETUNE_SHAPER_REMOTE]
 description: Test X/Y resonances via remote Shake&Tune service
 gcode:
   {% if printer.toolhead.homed_axes != "xyz" %}
@@ -93,7 +93,7 @@ gcode:
   RESPOND MSG="Uploading..."
   RUN_SHELL_COMMAND CMD=shaketune_shaper
 
-[gcode_macro SHAKETUNE_BELTS]
+[gcode_macro SHAKETUNE_BELTS_REMOTE]
 description: Test belt resonances via remote Shake&Tune service
 gcode:
   {% if printer.toolhead.homed_axes != "xyz" %}
@@ -112,8 +112,8 @@ gcode:
 ### 3. Restart Klipper and run
 
 ```
-SHAKETUNE_SHAPER
-SHAKETUNE_BELTS
+SHAKETUNE_SHAPER_REMOTE
+SHAKETUNE_BELTS_REMOTE
 ```
 
 The graph URL is shown immediately when upload starts - no need to wait for processing.
