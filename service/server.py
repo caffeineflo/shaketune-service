@@ -9,7 +9,7 @@ Designed for use with Creality K1 and other Klipper-based printers.
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse, FileResponse
 import subprocess
 import uuid
 import os
@@ -160,6 +160,36 @@ async def health():
     return {"status": "ok", "service": "shaketune-service"}
 
 
+def get_latest_file(graph_type: str) -> Optional[str]:
+    """Find the most recent graph file of the given type."""
+    try:
+        files = [f for f in os.listdir(RESULTS_DIR) if f.endswith(f"_{graph_type}.png")]
+        if not files:
+            return None
+        # Files are named with timestamp prefix, so sorting gives chronological order
+        files.sort(reverse=True)
+        return files[0]
+    except Exception:
+        return None
+
+
+@app.get("/latest/{graph_type}")
+async def latest_graph(graph_type: str):
+    """
+    Redirect to the most recent graph of the specified type.
+
+    Supported types: shaper, belts, vibrations
+    """
+    if graph_type not in ["shaper", "belts", "vibrations"]:
+        raise HTTPException(status_code=400, detail=f"Invalid graph type: {graph_type}")
+
+    latest = get_latest_file(graph_type)
+    if not latest:
+        raise HTTPException(status_code=404, detail=f"No {graph_type} graphs found")
+
+    return RedirectResponse(url=f"/results/{latest}", status_code=302)
+
+
 @app.get("/")
 async def root():
     """API documentation."""
@@ -172,6 +202,7 @@ async def root():
             "POST /belts": "Upload belt test CSVs, get belt comparison graph",
             "POST /vibrations": "Upload vibration CSVs, get speed analysis graph",
             "GET /results/{filename}": "Retrieve generated graph",
+            "GET /latest/{type}": "Redirect to most recent graph (shaper, belts, vibrations)",
             "GET /health": "Health check",
         },
         "usage": {
