@@ -7,11 +7,10 @@ and generates analysis graphs for input shaper calibration.
 Designed for use with Creality K1 and other Klipper-based printers.
 """
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, RedirectResponse, FileResponse
 import subprocess
-import uuid
 import os
 import shutil
 import tempfile
@@ -68,20 +67,31 @@ async def save_uploaded_files(files: List[UploadFile], tmpdir: str) -> List[str]
     return csv_paths
 
 
+def get_printer_dir(printer: str) -> str:
+    """Get or create printer-specific results directory."""
+    printer_dir = os.path.join(RESULTS_DIR, printer)
+    os.makedirs(printer_dir, exist_ok=True)
+    return printer_dir
+
+
 @app.post("/shaper")
 async def analyze_shaper(
     files: List[UploadFile] = File(...),
-    max_freq: Optional[float] = 200.0,
-    scv: Optional[float] = 5.0
+    printer: Optional[str] = Form(default="default"),
+    timestamp: Optional[str] = Form(default=None),
+    max_freq: Optional[float] = Form(default=200.0),
+    scv: Optional[float] = Form(default=5.0)
 ):
     """
     Analyze resonance data and generate input shaper calibration graph.
 
     Upload raw accelerometer CSV files from TEST_RESONANCES commands.
+    Optional 'printer' parameter to organize results by printer name.
+    Optional 'timestamp' parameter for predictable URLs (format: YYYYMMDD_HHMMSS).
     Returns URL to the generated analysis graph.
     """
-    job_id = uuid.uuid4().hex[:8]
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+    printer_dir = get_printer_dir(printer)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         csv_paths = await save_uploaded_files(files, tmpdir)
@@ -90,26 +100,30 @@ async def analyze_shaper(
         extra_args = ["--max_freq", str(max_freq), "--scv", str(scv)]
         run_graph_cli("input_shaper", csv_paths, output_png, extra_args)
 
-        final_name = f"{timestamp}_{job_id}_shaper.png"
-        final_path = os.path.join(RESULTS_DIR, final_name)
+        final_name = f"{ts}_shaper.png"
+        final_path = os.path.join(printer_dir, final_name)
         shutil.move(output_png, final_path)
 
-    return {"url": f"/results/{final_name}", "id": job_id, "type": "shaper"}
+    return {"url": f"/results/{printer}/{final_name}", "type": "shaper", "printer": printer}
 
 
 @app.post("/belts")
 async def analyze_belts(
     files: List[UploadFile] = File(...),
-    max_freq: Optional[float] = 200.0
+    printer: Optional[str] = Form(default="default"),
+    timestamp: Optional[str] = Form(default=None),
+    max_freq: Optional[float] = Form(default=200.0)
 ):
     """
     Analyze belt tension data and generate comparison graph.
 
     Upload raw accelerometer CSV files from belt resonance tests.
+    Optional 'printer' parameter to organize results by printer name.
+    Optional 'timestamp' parameter for predictable URLs (format: YYYYMMDD_HHMMSS).
     Returns URL to the generated belt comparison graph.
     """
-    job_id = uuid.uuid4().hex[:8]
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+    printer_dir = get_printer_dir(printer)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         csv_paths = await save_uploaded_files(files, tmpdir)
@@ -118,27 +132,31 @@ async def analyze_belts(
         extra_args = ["--max_freq", str(max_freq)]
         run_graph_cli("belts", csv_paths, output_png, extra_args)
 
-        final_name = f"{timestamp}_{job_id}_belts.png"
-        final_path = os.path.join(RESULTS_DIR, final_name)
+        final_name = f"{ts}_belts.png"
+        final_path = os.path.join(printer_dir, final_name)
         shutil.move(output_png, final_path)
 
-    return {"url": f"/results/{final_name}", "id": job_id, "type": "belts"}
+    return {"url": f"/results/{printer}/{final_name}", "type": "belts", "printer": printer}
 
 
 @app.post("/vibrations")
 async def analyze_vibrations(
     files: List[UploadFile] = File(...),
-    kinematics: Optional[str] = "corexy",
-    max_freq: Optional[float] = 1000.0
+    printer: Optional[str] = Form(default="default"),
+    timestamp: Optional[str] = Form(default=None),
+    kinematics: Optional[str] = Form(default="corexy"),
+    max_freq: Optional[float] = Form(default=1000.0)
 ):
     """
     Analyze vibration data across speeds and generate analysis graph.
 
     Upload raw accelerometer CSV files from vibration measurements.
+    Optional 'printer' parameter to organize results by printer name.
+    Optional 'timestamp' parameter for predictable URLs (format: YYYYMMDD_HHMMSS).
     Returns URL to the generated vibration analysis graph.
     """
-    job_id = uuid.uuid4().hex[:8]
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+    printer_dir = get_printer_dir(printer)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         csv_paths = await save_uploaded_files(files, tmpdir)
@@ -147,11 +165,11 @@ async def analyze_vibrations(
         extra_args = ["--max_freq", str(max_freq), "--kinematics", kinematics]
         run_graph_cli("vibrations", csv_paths, output_png, extra_args)
 
-        final_name = f"{timestamp}_{job_id}_vibrations.png"
-        final_path = os.path.join(RESULTS_DIR, final_name)
+        final_name = f"{ts}_vibrations.png"
+        final_path = os.path.join(printer_dir, final_name)
         shutil.move(output_png, final_path)
 
-    return {"url": f"/results/{final_name}", "id": job_id, "type": "vibrations"}
+    return {"url": f"/results/{printer}/{final_name}", "type": "vibrations", "printer": printer}
 
 
 @app.get("/health")
@@ -160,10 +178,13 @@ async def health():
     return {"status": "ok", "service": "shaketune-service"}
 
 
-def get_latest_file(graph_type: str) -> Optional[str]:
-    """Find the most recent graph file of the given type."""
+def get_latest_file(graph_type: str, printer: str = "default") -> Optional[str]:
+    """Find the most recent graph file of the given type for a printer."""
     try:
-        files = [f for f in os.listdir(RESULTS_DIR) if f.endswith(f"_{graph_type}.png")]
+        printer_dir = os.path.join(RESULTS_DIR, printer)
+        if not os.path.exists(printer_dir):
+            return None
+        files = [f for f in os.listdir(printer_dir) if f.endswith(f"_{graph_type}.png")]
         if not files:
             return None
         # Files are named with timestamp prefix, so sorting gives chronological order
@@ -173,21 +194,38 @@ def get_latest_file(graph_type: str) -> Optional[str]:
         return None
 
 
-@app.get("/latest/{graph_type}")
-async def latest_graph(graph_type: str):
+@app.get("/latest/{printer}/{graph_type}")
+async def latest_graph_for_printer(printer: str, graph_type: str):
     """
-    Redirect to the most recent graph of the specified type.
+    Redirect to the most recent graph of the specified type for a printer.
 
     Supported types: shaper, belts, vibrations
     """
     if graph_type not in ["shaper", "belts", "vibrations"]:
         raise HTTPException(status_code=400, detail=f"Invalid graph type: {graph_type}")
 
-    latest = get_latest_file(graph_type)
+    latest = get_latest_file(graph_type, printer)
+    if not latest:
+        raise HTTPException(status_code=404, detail=f"No {graph_type} graphs found for printer '{printer}'")
+
+    return RedirectResponse(url=f"/results/{printer}/{latest}", status_code=302)
+
+
+@app.get("/latest/{graph_type}")
+async def latest_graph(graph_type: str):
+    """
+    Redirect to the most recent graph of the specified type (default printer).
+
+    Supported types: shaper, belts, vibrations
+    """
+    if graph_type not in ["shaper", "belts", "vibrations"]:
+        raise HTTPException(status_code=400, detail=f"Invalid graph type: {graph_type}")
+
+    latest = get_latest_file(graph_type, "default")
     if not latest:
         raise HTTPException(status_code=404, detail=f"No {graph_type} graphs found")
 
-    return RedirectResponse(url=f"/results/{latest}", status_code=302)
+    return RedirectResponse(url=f"/results/default/{latest}", status_code=302)
 
 
 @app.get("/")
@@ -195,17 +233,19 @@ async def root():
     """API documentation."""
     return {
         "service": "Shake&Tune Analysis Service",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "description": "Process Klipper accelerometer data for input shaper calibration",
         "endpoints": {
-            "POST /shaper": "Upload resonance CSVs, get input shaper calibration graph",
-            "POST /belts": "Upload belt test CSVs, get belt comparison graph",
-            "POST /vibrations": "Upload vibration CSVs, get speed analysis graph",
-            "GET /results/{filename}": "Retrieve generated graph",
-            "GET /latest/{type}": "Redirect to most recent graph (shaper, belts, vibrations)",
+            "POST /shaper": "Upload resonance CSVs, get input shaper graph (optional: printer=name)",
+            "POST /belts": "Upload belt test CSVs, get belt comparison graph (optional: printer=name)",
+            "POST /vibrations": "Upload vibration CSVs, get speed analysis graph (optional: printer=name)",
+            "GET /results/{printer}/{filename}": "Retrieve generated graph",
+            "GET /latest/{printer}/{type}": "Redirect to printer's latest graph",
+            "GET /latest/{type}": "Redirect to latest graph (default printer)",
             "GET /health": "Health check",
         },
         "usage": {
-            "example": 'curl -X POST http://localhost:8080/shaper -F "files=@resonance_x.csv" -F "files=@resonance_y.csv"',
+            "single_printer": 'curl -X POST http://host:3080/shaper -F "files=@x.csv" -F "files=@y.csv"',
+            "multi_printer": 'curl -X POST http://host:3080/shaper -F "files=@x.csv" -F "files=@y.csv" -F "printer=k1v3"',
         }
     }
