@@ -110,6 +110,7 @@ class ShaperComputation:
                 'smoothing': shaper.smoothing,
                 'max_accel': shaper.max_accel,
                 'vals': shaper.vals,
+                'freq_bins': shaper.freq_bins,
             }
             shaper_table_data['shapers'].append(shaper_info)
             max_smoothing_computed = max(max_smoothing_computed, shaper.smoothing)

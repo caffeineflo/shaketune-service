@@ -129,7 +129,8 @@ class ShaperPlotter(PlotterStrategy):
         ax_2 = ax.twinx()
         ax_2.yaxis.set_visible(False)
         for shaper in data['shapers']:
-            ax_2.plot(freqs, shaper.vals, label=shaper.name.upper(), linestyle='dotted')
+            # Use shaper's own freq_bins which matches its vals array
+            ax_2.plot(shaper.freq_bins, shaper.vals, label=shaper.name.upper(), linestyle='dotted')
 
         # Draw shaper filtered PSDs
         shaper_choices = data['shaper_choices']
