@@ -58,12 +58,15 @@ def run_graph_cli(graph_type: str, csv_paths: List[str], output_path: str, extra
 async def save_uploaded_files(files: List[UploadFile], tmpdir: str) -> List[str]:
     """Save uploaded files to temp directory and return paths."""
     csv_paths = []
+    print(f"DEBUG: Received {len(files)} files")
     for f in files:
+        print(f"DEBUG: Processing file: {f.filename}, size: {f.size}")
         path = os.path.join(tmpdir, f.filename)
         with open(path, "wb") as out:
             content = await f.read()
             out.write(content)
         csv_paths.append(path)
+    print(f"DEBUG: Saved files: {csv_paths}")
     return csv_paths
 
 
