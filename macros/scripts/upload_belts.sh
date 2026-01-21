@@ -27,7 +27,7 @@ done
 if [ "$SIZE_A" -gt 1000000 ] && [ "$SIZE_B" -gt 1000000 ]; then
   TS=$(date +%Y%m%d_%H%M%S)
   echo "Uploading to service..."
-  curl POST "http://${HOST}:${PORT}/belts" \
+  curl -X POST "http://${HOST}:${PORT}/belts" \
     -F "file_a=@${FILE_A}" \
     -F "file_b=@${FILE_B}" \
     -F "printer=${PRINTER}" \
