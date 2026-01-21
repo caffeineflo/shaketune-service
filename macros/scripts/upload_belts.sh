@@ -26,12 +26,22 @@ done
 
 if [ "$SIZE_A" -gt 1000000 ] && [ "$SIZE_B" -gt 1000000 ]; then
   TS=$(date +%Y%m%d_%H%M%S)
+
+  # Compress files for faster upload (K1's BusyBox curl struggles with large files)
+  echo "Compressing files..."
+  gzip -f -k "$FILE_A"
+  gzip -f -k "$FILE_B"
+
   echo "Uploading to service..."
   curl -X POST "http://${HOST}:${PORT}/belts" \
-    -F "file_a=@${FILE_A}" \
-    -F "file_b=@${FILE_B}" \
+    -F "file_a=@${FILE_A}.gz" \
+    -F "file_b=@${FILE_B}.gz" \
     -F "printer=${PRINTER}" \
     -F "timestamp=${TS}" 2>/dev/null
+
+  # Cleanup compressed files
+  rm -f "${FILE_A}.gz" "${FILE_B}.gz"
+
   echo ""
   echo "==========================================="
   echo "BELTS GRAPH: http://${HOST}:${PORT}/results/${PRINTER}/${TS}_belts.png"

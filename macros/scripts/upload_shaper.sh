@@ -24,12 +24,22 @@ done
 
 if [ "$SIZE_X" -gt 1000000 ] && [ "$SIZE_Y" -gt 1000000 ]; then
   TS=$(date +%Y%m%d_%H%M%S)
+
+  # Compress files for faster upload (K1's BusyBox curl struggles with large files)
+  echo "Compressing files..."
+  gzip -f -k "$FILE_X"
+  gzip -f -k "$FILE_Y"
+
   echo "Uploading to service..."
   curl -X POST "http://${HOST}:${PORT}/shaper" \
-    -F "file_x=@${FILE_X}" \
-    -F "file_y=@${FILE_Y}" \
+    -F "file_x=@${FILE_X}.gz" \
+    -F "file_y=@${FILE_Y}.gz" \
     -F "printer=${PRINTER}" \
     -F "timestamp=${TS}" 2>/dev/null
+
+  # Cleanup compressed files
+  rm -f "${FILE_X}.gz" "${FILE_Y}.gz"
+
   echo ""
   echo "==========================================="
   echo "SHAPER GRAPH: http://${HOST}:${PORT}/results/${PRINTER}/${TS}_shaper.png"
