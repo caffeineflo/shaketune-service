@@ -79,7 +79,9 @@ def get_printer_dir(printer: str) -> str:
 
 @app.post("/shaper")
 async def analyze_shaper(
-    files: List[UploadFile] = File(...),
+    files: List[UploadFile] = File(default=None),
+    file_x: Optional[UploadFile] = File(default=None),
+    file_y: Optional[UploadFile] = File(default=None),
     printer: Optional[str] = Form(default="default"),
     timestamp: Optional[str] = Form(default=None),
     max_freq: Optional[float] = Form(default=200.0),
@@ -89,6 +91,9 @@ async def analyze_shaper(
     Analyze resonance data and generate input shaper calibration graph.
 
     Upload raw accelerometer CSV files from TEST_RESONANCES commands.
+    Accepts either:
+    - files: multiple files with same field name (standard curl)
+    - file_x and file_y: separate fields (for BusyBox curl compatibility)
     Optional 'printer' parameter to organize results by printer name.
     Optional 'timestamp' parameter for predictable URLs (format: YYYYMMDD_HHMMSS).
     Returns URL to the generated analysis graph.
@@ -96,8 +101,23 @@ async def analyze_shaper(
     ts = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
     printer_dir = get_printer_dir(printer)
 
+    # Build file list from either 'files' array or individual file_x/file_y params
+    upload_files = []
+    if files:
+        upload_files.extend(files)
+    if file_x:
+        upload_files.append(file_x)
+    if file_y:
+        upload_files.append(file_y)
+
+    if len(upload_files) < 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Shaper analysis requires at least 1 file. Received {len(upload_files)} file(s)."
+        )
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        csv_paths = await save_uploaded_files(files, tmpdir)
+        csv_paths = await save_uploaded_files(upload_files, tmpdir)
         output_png = os.path.join(tmpdir, "shaper.png")
 
         extra_args = ["--max_freq", str(max_freq), "--scv", str(scv)]
@@ -112,7 +132,9 @@ async def analyze_shaper(
 
 @app.post("/belts")
 async def analyze_belts(
-    files: List[UploadFile] = File(...),
+    files: List[UploadFile] = File(default=None),
+    file_a: Optional[UploadFile] = File(default=None),
+    file_b: Optional[UploadFile] = File(default=None),
     printer: Optional[str] = Form(default="default"),
     timestamp: Optional[str] = Form(default=None),
     max_freq: Optional[float] = Form(default=200.0)
@@ -121,6 +143,9 @@ async def analyze_belts(
     Analyze belt tension data and generate comparison graph.
 
     Upload raw accelerometer CSV files from belt resonance tests.
+    Accepts either:
+    - files: multiple files with same field name (standard curl)
+    - file_a and file_b: separate fields (for BusyBox curl compatibility)
     Optional 'printer' parameter to organize results by printer name.
     Optional 'timestamp' parameter for predictable URLs (format: YYYYMMDD_HHMMSS).
     Returns URL to the generated belt comparison graph.
@@ -128,8 +153,23 @@ async def analyze_belts(
     ts = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
     printer_dir = get_printer_dir(printer)
 
+    # Build file list from either 'files' array or individual file_a/file_b params
+    upload_files = []
+    if files:
+        upload_files.extend(files)
+    if file_a:
+        upload_files.append(file_a)
+    if file_b:
+        upload_files.append(file_b)
+
+    if len(upload_files) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Belt analysis requires 2 files. Received {len(upload_files)} file(s)."
+        )
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        csv_paths = await save_uploaded_files(files, tmpdir)
+        csv_paths = await save_uploaded_files(upload_files, tmpdir)
         output_png = os.path.join(tmpdir, "belts.png")
 
         extra_args = ["--max_freq", str(max_freq)]
