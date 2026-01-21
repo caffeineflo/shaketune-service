@@ -79,7 +79,7 @@ def get_printer_dir(printer: str) -> str:
 
 @app.post("/shaper")
 async def analyze_shaper(
-    files: List[UploadFile] = File(default=None),
+    files: Optional[List[UploadFile]] = File(default=None),
     file_x: Optional[UploadFile] = File(default=None),
     file_y: Optional[UploadFile] = File(default=None),
     printer: Optional[str] = Form(default="default"),
@@ -132,7 +132,7 @@ async def analyze_shaper(
 
 @app.post("/belts")
 async def analyze_belts(
-    files: List[UploadFile] = File(default=None),
+    files: Optional[List[UploadFile]] = File(default=None),
     file_a: Optional[UploadFile] = File(default=None),
     file_b: Optional[UploadFile] = File(default=None),
     printer: Optional[str] = Form(default="default"),
