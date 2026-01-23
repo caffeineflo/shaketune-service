@@ -53,6 +53,13 @@
             gap: 1rem;
             align-items: center;
             border: 1px solid #0f3460;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .result-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            border-color: #e94560;
         }
         .thumbnail {
             width: 120px;
@@ -130,15 +137,15 @@
             {% if results.shaper %}
             <div class="results">
                 {% for result in results.shaper %}
-                <div class="result-card">
+                <div class="result-card" onclick="window.open('/results/{{ printer_name }}/{{ result.file }}', '_blank')">
                     <img src="/results/{{ printer_name }}/{{ result.file }}" alt="Shaper result" class="thumbnail" loading="lazy">
                     <div class="result-info">
                         <div class="timestamp">{{ result.timestamp }}</div>
                         <div class="filename">{{ result.file }}</div>
                     </div>
                     <div class="actions">
-                        <a href="/results/{{ printer_name }}/{{ result.file }}" target="_blank" class="btn btn-view">View</a>
-                        <a href="/results/{{ printer_name }}/{{ result.file }}" download class="btn btn-download">Download</a>
+                        <a href="/results/{{ printer_name }}/{{ result.file }}" target="_blank" class="btn btn-view" onclick="event.stopPropagation()">View</a>
+                        <a href="/results/{{ printer_name }}/{{ result.file }}" download class="btn btn-download" onclick="event.stopPropagation()">Download</a>
                     </div>
                 </div>
                 {% endfor %}
@@ -153,15 +160,15 @@
             {% if results.belts %}
             <div class="results">
                 {% for result in results.belts %}
-                <div class="result-card">
+                <div class="result-card" onclick="window.open('/results/{{ printer_name }}/{{ result.file }}', '_blank')">
                     <img src="/results/{{ printer_name }}/{{ result.file }}" alt="Belt result" class="thumbnail" loading="lazy">
                     <div class="result-info">
                         <div class="timestamp">{{ result.timestamp }}</div>
                         <div class="filename">{{ result.file }}</div>
                     </div>
                     <div class="actions">
-                        <a href="/results/{{ printer_name }}/{{ result.file }}" target="_blank" class="btn btn-view">View</a>
-                        <a href="/results/{{ printer_name }}/{{ result.file }}" download class="btn btn-download">Download</a>
+                        <a href="/results/{{ printer_name }}/{{ result.file }}" target="_blank" class="btn btn-view" onclick="event.stopPropagation()">View</a>
+                        <a href="/results/{{ printer_name }}/{{ result.file }}" download class="btn btn-download" onclick="event.stopPropagation()">Download</a>
                     </div>
                 </div>
                 {% endfor %}
