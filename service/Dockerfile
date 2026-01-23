@@ -9,7 +9,7 @@ WORKDIR /app
 # Install Python dependencies
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir fastapi uvicorn python-multipart
+    pip install --no-cache-dir fastapi uvicorn python-multipart jinja2
 
 # Copy Shake&Tune module
 COPY shaketune /app/shaketune/
@@ -17,8 +17,9 @@ COPY shaketune /app/shaketune/
 # Copy minimal Klipper dependencies for shaper calibration
 COPY service/klipper /app/service/klipper/
 
-# Copy server
+# Copy server and templates
 COPY service/server.py /app/service/
+COPY service/templates /app/service/templates/
 
 # Create results directory
 RUN mkdir -p /app/results

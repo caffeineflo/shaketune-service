@@ -7,15 +7,18 @@ and generates analysis graphs for input shaper calibration.
 Designed for use with Creality K1 and other Klipper-based printers.
 """
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, RedirectResponse, FileResponse
+from fastapi.responses import JSONResponse, RedirectResponse, FileResponse, HTMLResponse
+from fastapi.templating import Jinja2Templates
 import subprocess
 import os
 import shutil
 import tempfile
-from typing import List, Optional
+import re
+from typing import List, Optional, Dict, Any
 from datetime import datetime
+from pathlib import Path
 
 app = FastAPI(
     title="Shake&Tune Analysis Service",
@@ -29,6 +32,63 @@ SHAKETUNE_DIR = os.environ.get("SHAKETUNE_DIR", "/app/shaketune/graph_creators")
 
 os.makedirs(RESULTS_DIR, exist_ok=True)
 app.mount("/results", StaticFiles(directory=RESULTS_DIR), name="results")
+
+# Templates setup
+TEMPLATES_DIR = Path(__file__).parent / "templates"
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+
+def get_all_results() -> Dict[str, Dict[str, List[Dict[str, str]]]]:
+    """Scan results directory and return structured data for all printers."""
+    results = {}
+
+    if not os.path.exists(RESULTS_DIR):
+        return results
+
+    # Pattern to match result files: YYYYMMDD_HHMMSS_type.png
+    pattern = re.compile(r'^(\d{8}_\d{6})_(shaper|belts|vibrations)\.png$')
+
+    for printer_name in os.listdir(RESULTS_DIR):
+        printer_path = os.path.join(RESULTS_DIR, printer_name)
+        if not os.path.isdir(printer_path):
+            continue
+
+        printer_data = {"shaper": [], "belts": [], "vibrations": []}
+
+        for filename in os.listdir(printer_path):
+            match = pattern.match(filename)
+            if match:
+                ts_str, graph_type = match.groups()
+                # Parse timestamp for display
+                try:
+                    dt = datetime.strptime(ts_str, "%Y%m%d_%H%M%S")
+                    formatted_ts = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    formatted_ts = ts_str
+
+                printer_data[graph_type].append({
+                    "file": filename,
+                    "timestamp": formatted_ts,
+                    "sort_key": ts_str
+                })
+
+        # Sort each type by timestamp (newest first)
+        for graph_type in printer_data:
+            printer_data[graph_type].sort(key=lambda x: x["sort_key"], reverse=True)
+
+        # Calculate last activity
+        all_results = printer_data["shaper"] + printer_data["belts"] + printer_data["vibrations"]
+        if all_results:
+            latest = max(all_results, key=lambda x: x["sort_key"])
+            printer_data["last_activity"] = latest["timestamp"]
+        else:
+            printer_data["last_activity"] = None
+
+        # Only include printer if it has any results
+        if any(printer_data[t] for t in ["shaper", "belts", "vibrations"]):
+            results[printer_name] = printer_data
+
+    return results
 
 
 def run_graph_cli(graph_type: str, csv_paths: List[str], output_path: str, extra_args: List[str] = None) -> bool:
@@ -283,8 +343,40 @@ async def latest_graph(graph_type: str):
     return RedirectResponse(url=f"/results/default/{latest}", status_code=302)
 
 
-@app.get("/")
-async def root():
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    """Dashboard home page showing all printers."""
+    printers = get_all_results()
+    return templates.TemplateResponse("home.html", {
+        "request": request,
+        "printers": printers
+    })
+
+
+@app.get("/printer/{printer_name}", response_class=HTMLResponse)
+async def printer_detail(request: Request, printer_name: str):
+    """Printer detail page showing all results."""
+    all_results = get_all_results()
+
+    if printer_name not in all_results:
+        # Check if printer directory exists but is empty
+        printer_path = os.path.join(RESULTS_DIR, printer_name)
+        if os.path.isdir(printer_path):
+            results = {"shaper": [], "belts": [], "vibrations": []}
+        else:
+            raise HTTPException(status_code=404, detail=f"Printer '{printer_name}' not found")
+    else:
+        results = all_results[printer_name]
+
+    return templates.TemplateResponse("printer.html", {
+        "request": request,
+        "printer_name": printer_name,
+        "results": results
+    })
+
+
+@app.get("/api")
+async def api_docs():
     """API documentation."""
     return {
         "service": "Shake&Tune Analysis Service",
@@ -298,6 +390,8 @@ async def root():
             "GET /latest/{printer}/{type}": "Redirect to printer's latest graph",
             "GET /latest/{type}": "Redirect to latest graph (default printer)",
             "GET /health": "Health check",
+            "GET /": "Web dashboard",
+            "GET /printer/{name}": "Printer results page",
         },
         "usage": {
             "single_printer": 'curl -X POST http://host:3080/shaper -F "files=@x.csv" -F "files=@y.csv"',

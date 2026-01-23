@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ printer_name }} - Shake&Tune Results</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+            padding: 2rem;
+        }
+        .header {
+            max-width: 1200px;
+            margin: 0 auto 2rem;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+        .back {
+            color: #e94560;
+            text-decoration: none;
+            font-size: 1.5rem;
+        }
+        .back:hover { text-decoration: underline; }
+        h1 { color: #fff; }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .section {
+            margin-bottom: 2rem;
+        }
+        h2 {
+            color: #e94560;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid #0f3460;
+        }
+        .results {
+            display: grid;
+            gap: 1rem;
+        }
+        .result-card {
+            background: #16213e;
+            border-radius: 8px;
+            padding: 1rem;
+            display: grid;
+            grid-template-columns: 120px 1fr auto;
+            gap: 1rem;
+            align-items: center;
+            border: 1px solid #0f3460;
+        }
+        .thumbnail {
+            width: 120px;
+            height: 80px;
+            object-fit: cover;
+            border-radius: 4px;
+            background: #0f3460;
+        }
+        .result-info {
+            min-width: 0;
+        }
+        .timestamp {
+            font-size: 1.1rem;
+            color: #fff;
+            margin-bottom: 0.25rem;
+        }
+        .filename {
+            font-size: 0.75rem;
+            color: #666;
+            word-break: break-all;
+        }
+        .actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+        .btn {
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            text-decoration: none;
+            font-size: 0.875rem;
+            transition: background 0.2s;
+        }
+        .btn-view {
+            background: #e94560;
+            color: #fff;
+        }
+        .btn-view:hover { background: #d63050; }
+        .btn-download {
+            background: #0f3460;
+            color: #eee;
+        }
+        .btn-download:hover { background: #1a4a7a; }
+        .empty {
+            color: #666;
+            padding: 2rem;
+            text-align: center;
+            background: #16213e;
+            border-radius: 8px;
+        }
+        @media (max-width: 600px) {
+            .result-card {
+                grid-template-columns: 1fr;
+                text-align: center;
+            }
+            .thumbnail {
+                width: 100%;
+                height: auto;
+                max-height: 200px;
+            }
+            .actions {
+                justify-content: center;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <a href="/" class="back">&larr;</a>
+        <h1>{{ printer_name }}</h1>
+    </div>
+
+    <div class="container">
+        <div class="section">
+            <h2>Shaper Results</h2>
+            {% if results.shaper %}
+            <div class="results">
+                {% for result in results.shaper %}
+                <div class="result-card">
+                    <img src="/results/{{ printer_name }}/{{ result.file }}" alt="Shaper result" class="thumbnail" loading="lazy">
+                    <div class="result-info">
+                        <div class="timestamp">{{ result.timestamp }}</div>
+                        <div class="filename">{{ result.file }}</div>
+                    </div>
+                    <div class="actions">
+                        <a href="/results/{{ printer_name }}/{{ result.file }}" target="_blank" class="btn btn-view">View</a>
+                        <a href="/results/{{ printer_name }}/{{ result.file }}" download class="btn btn-download">Download</a>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty">No shaper results yet</div>
+            {% endif %}
+        </div>
+
+        <div class="section">
+            <h2>Belt Results</h2>
+            {% if results.belts %}
+            <div class="results">
+                {% for result in results.belts %}
+                <div class="result-card">
+                    <img src="/results/{{ printer_name }}/{{ result.file }}" alt="Belt result" class="thumbnail" loading="lazy">
+                    <div class="result-info">
+                        <div class="timestamp">{{ result.timestamp }}</div>
+                        <div class="filename">{{ result.file }}</div>
+                    </div>
+                    <div class="actions">
+                        <a href="/results/{{ printer_name }}/{{ result.file }}" target="_blank" class="btn btn-view">View</a>
+                        <a href="/results/{{ printer_name }}/{{ result.file }}" download class="btn btn-download">Download</a>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty">No belt results yet</div>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>

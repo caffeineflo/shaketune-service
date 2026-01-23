@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shake&Tune Results</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+            padding: 2rem;
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 2rem;
+            color: #fff;
+        }
+        .subtitle {
+            text-align: center;
+            color: #888;
+            margin-bottom: 2rem;
+        }
+        .printers {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 1.5rem;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        .printer-card {
+            background: #16213e;
+            border-radius: 8px;
+            padding: 1.5rem;
+            text-decoration: none;
+            color: inherit;
+            transition: transform 0.2s, box-shadow 0.2s;
+            border: 1px solid #0f3460;
+        }
+        .printer-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            border-color: #e94560;
+        }
+        .printer-name {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 0.75rem;
+            color: #fff;
+        }
+        .printer-stats {
+            font-size: 0.875rem;
+            color: #aaa;
+        }
+        .printer-stats div {
+            margin-bottom: 0.25rem;
+        }
+        .count {
+            color: #e94560;
+            font-weight: 600;
+        }
+        .empty {
+            text-align: center;
+            color: #666;
+            padding: 3rem;
+        }
+        .api-link {
+            text-align: center;
+            margin-top: 2rem;
+        }
+        .api-link a {
+            color: #e94560;
+            text-decoration: none;
+        }
+        .api-link a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <h1>Shake&Tune Results</h1>
+    <p class="subtitle">Select a printer to view calibration results</p>
+
+    {% if printers %}
+    <div class="printers">
+        {% for name, data in printers.items() %}
+        <a href="/printer/{{ name }}" class="printer-card">
+            <div class="printer-name">{{ name }}</div>
+            <div class="printer-stats">
+                <div><span class="count">{{ data.shaper|length }}</span> shaper results</div>
+                <div><span class="count">{{ data.belts|length }}</span> belt results</div>
+                {% if data.last_activity %}
+                <div style="margin-top: 0.5rem; font-size: 0.75rem;">Last: {{ data.last_activity }}</div>
+                {% endif %}
+            </div>
+        </a>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">
+        <p>No results yet.</p>
+        <p style="margin-top: 1rem;">Run SHAKETUNE_SHAPER_REMOTE or SHAKETUNE_BELTS_REMOTE on your printer to generate results.</p>
+    </div>
+    {% endif %}
+
+    <div class="api-link">
+        <a href="/api">API Documentation</a>
+    </div>
+</body>
+</html>
