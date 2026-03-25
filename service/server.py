@@ -347,8 +347,7 @@ async def latest_graph(graph_type: str):
 async def home(request: Request):
     """Dashboard home page showing all printers."""
     printers = get_all_results()
-    return templates.TemplateResponse("home.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "home.html", {
         "printers": printers
     })
 
@@ -368,8 +367,7 @@ async def printer_detail(request: Request, printer_name: str):
     else:
         results = all_results[printer_name]
 
-    return templates.TemplateResponse("printer.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "printer.html", {
         "printer_name": printer_name,
         "results": results
     })
