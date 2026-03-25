@@ -25,133 +25,93 @@ services:
     restart: unless-stopped
 ```
 
-## K1 Integration
+## K1 Installation
 
-### 1. Create upload scripts
+SSH into your K1 and run the installer. You need the `macros/` directory from this repo (clone it or copy it to the K1 first):
 
-These scripts generate a timestamp, show the predictable URL immediately, then upload.
-
-**`/usr/data/printer_data/config/shaketune_upload.sh`:**
-```sh
-#!/bin/sh
-SERVER="http://YOUR_SERVER:3080"
-PRINTER="k1v4"  # Change per printer
-TS=$(date +%Y%m%d_%H%M%S)
-echo "==========================================="
-echo "Graph URL: ${SERVER}/results/${PRINTER}/${TS}_shaper.png"
-echo "==========================================="
-curl POST "${SERVER}/shaper" \
-  -F "files=@/tmp/raw_data_x_x.csv" \
-  -F "files=@/tmp/raw_data_y_y.csv" \
-  -F "printer=${PRINTER}" \
-  -F "timestamp=${TS}"
+```bash
+# On the K1 via SSH
+cd /tmp
+wget -O install.tar.gz https://github.com/caffeineflo/shaketune-service/archive/refs/heads/main.tar.gz
+tar xzf install.tar.gz --strip-components=2 shaketune-service-main/macros
+sh install.sh 192.168.40.11 3080 k1v3
 ```
 
-**`/usr/data/printer_data/config/shaketune_belts_upload.sh`:**
-```sh
-#!/bin/sh
-SERVER="http://YOUR_SERVER:3080"
-PRINTER="k1v4"  # Change per printer
-TS=$(date +%Y%m%d_%H%M%S)
-echo "==========================================="
-echo "Graph URL: ${SERVER}/results/${PRINTER}/${TS}_belts.png"
-echo "==========================================="
-curl POST "${SERVER}/belts" \
-  -F "files=@/tmp/raw_data_axis=1.000,-1.000_a.csv" \
-  -F "files=@/tmp/raw_data_axis=1.000,1.000_b.csv" \
-  -F "printer=${PRINTER}" \
-  -F "timestamp=${TS}"
-```
+The installer:
+1. Copies scripts to `/usr/data/printer_data/config/shaketune/scripts/`
+2. Generates `shaketune.cfg` with your server host, port, and printer name baked in
+3. Adds `[include shaketune.cfg]` to `printer.cfg` if not already present
 
-Make executable: `chmod +x /usr/data/printer_data/config/shaketune_*.sh`
+After installing, do a `FIRMWARE_RESTART` in the Klipper console.
 
-### 2. Add to Klipper config
+## Usage
 
-```ini
-[gcode_shell_command shaketune_shaper]
-command: sh /usr/data/printer_data/config/shaketune_upload.sh
-timeout: 300.0
-verbose: True
-
-[gcode_shell_command shaketune_belts]
-command: sh /usr/data/printer_data/config/shaketune_belts_upload.sh
-timeout: 300.0
-verbose: True
-
-[gcode_macro SHAKETUNE_SHAPER_REMOTE]
-description: Test X/Y resonances via remote Shake&Tune service
-gcode:
-  {% if printer.toolhead.homed_axes != "xyz" %}
-    G28
-  {% endif %}
-  RESPOND MSG="Testing X axis..."
-  TEST_RESONANCES AXIS=X OUTPUT=raw_data NAME=x
-  M400
-  RESPOND MSG="Testing Y axis..."
-  TEST_RESONANCES AXIS=Y OUTPUT=raw_data NAME=y
-  M400
-  RESPOND MSG="Uploading..."
-  RUN_SHELL_COMMAND CMD=shaketune_shaper
-
-[gcode_macro SHAKETUNE_BELTS_REMOTE]
-description: Test belt resonances via remote Shake&Tune service
-gcode:
-  {% if printer.toolhead.homed_axes != "xyz" %}
-    G28
-  {% endif %}
-  RESPOND MSG="Testing belt B..."
-  TEST_RESONANCES AXIS=1,1 OUTPUT=raw_data NAME=b
-  M400
-  RESPOND MSG="Testing belt A..."
-  TEST_RESONANCES AXIS=1,-1 OUTPUT=raw_data NAME=a
-  M400
-  RESPOND MSG="Uploading..."
-  RUN_SHELL_COMMAND CMD=shaketune_belts
-```
-
-### 3. Restart Klipper and run
-
+### Input Shaper Calibration
 ```
 SHAKETUNE_SHAPER_REMOTE
+```
+Homes, centers toolhead, runs X and Y resonance tests, uploads CSVs to service, returns graph URL. Takes ~4 minutes.
+
+### Belt Comparison
+```
 SHAKETUNE_BELTS_REMOTE
 ```
+Runs Belt A test, does a firmware restart (to avoid K1 move queue overflow with raw data), runs Belt B test, uploads both. Takes ~6 minutes. Progress logged to `/tmp/shaketune_belts.log`.
 
-The graph URL is shown immediately when upload starts - no need to wait for processing.
+**Why the firmware restart?** The K1 has 209MB RAM. Two consecutive `TEST_RESONANCES` with `OUTPUT=raw_data` generates ~20MB per sweep. The move queue overflows before the second sweep completes, causing an MCU shutdown. The firmware restart between sweeps clears the queue. The script survives the restart because it runs detached from Klipper via `setsid`.
+
+### Excite at Frequency
+```
+SHAKETUNE_EXCITE_REMOTE FREQUENCY=50 DURATION=10 AXIS=x
+```
+Vibrates at a specific frequency for a set duration to locate resonance sources. Useful for diagnosing where a specific frequency peak is coming from.
 
 ## Multi-Printer Setup
+
+Run the installer on each K1 with a unique printer name:
+```bash
+# On K1v3
+sh install.sh 192.168.40.11 3080 k1v3
+
+# On K1v4
+sh install.sh 192.168.40.11 3080 k1v4
+```
 
 Each printer gets its own subdirectory in results:
 - `http://server:3080/results/k1v3/20260120_120000_shaper.png`
 - `http://server:3080/results/k1v4/20260120_120000_shaper.png`
 
-Just set a unique `PRINTER=` value in each printer's upload scripts.
-
 ## API
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/shaper` | POST | Upload X/Y CSVs → shaper graph |
-| `/belts` | POST | Upload belt CSVs → comparison graph |
-| `/vibrations` | POST | Upload vibration CSVs → analysis graph |
+| `/shaper` | POST | Upload X/Y CSVs, get input shaper graph |
+| `/belts` | POST | Upload belt CSVs, get comparison graph |
+| `/vibrations` | POST | Upload vibration CSVs, get analysis graph |
 | `/results/{printer}/{file}` | GET | Get specific graph |
 | `/latest/{printer}/{type}` | GET | Redirect to printer's latest graph |
 | `/latest/{type}` | GET | Redirect to latest (default printer) |
 | `/health` | GET | Health check |
+| `/` | GET | Web dashboard |
 
 ### Parameters
 
 All POST endpoints accept:
-- `files` (required) - CSV files from TEST_RESONANCES
-- `printer` (optional) - Printer name for organization, default: "default"
+- `files` (standard curl) or `file_x`/`file_y`, `file_a`/`file_b` (BusyBox curl)
+- `printer` (optional) - Printer name, default: "default"
 - `timestamp` (optional) - Client timestamp for predictable URLs, format: YYYYMMDD_HHMMSS
+
+Files can be gzipped (`.csv.gz`) and will be automatically decompressed.
 
 ## Troubleshooting
 
-**"Move queue overflow" during test:** K1 RAM limitation. Run X and Y tests separately with `FIRMWARE_RESTART` between them.
+**"Move queue overflow" during belt test:** This is handled automatically by `SHAKETUNE_BELTS_REMOTE`. If you see it anyway, check `/tmp/shaketune_belts.log` for details.
 
-**No graph generated:** Check logs: `docker logs shaketune-service`
+**Belt test seems stuck:** Check progress with `cat /tmp/shaketune_belts.log` via SSH. The test takes ~6 minutes total.
 
-**BusyBox curl:** K1 uses `curl POST url` not `curl -X POST url`.
+**No graph generated:** Check service logs: `docker logs shaketune-service`
+
+**BusyBox curl:** K1 uses `curl POST url` not `curl -X POST url`. The scripts handle this.
 
 ## License
 
