@@ -31,18 +31,20 @@ if [ "$SIZE_X" -gt 1000000 ] && [ "$SIZE_Y" -gt 1000000 ]; then
   gzip -f -k "$FILE_Y"
 
   echo "Uploading to service..."
-  curl -X POST "http://${HOST}:${PORT}/shaper" \
+  RESPONSE=$(curl -X POST "http://${HOST}:${PORT}/shaper" \
     -F "file_x=@${FILE_X}.gz" \
     -F "file_y=@${FILE_Y}.gz" \
     -F "printer=${PRINTER}" \
-    -F "timestamp=${TS}" 2>/dev/null
+    -F "timestamp=${TS}" 2>/dev/null)
+  echo "$RESPONSE"
 
   # Cleanup compressed files
   rm -f "${FILE_X}.gz" "${FILE_Y}.gz"
 
   echo ""
   echo "==========================================="
-  echo "SHAPER GRAPH: http://${HOST}:${PORT}/results/${PRINTER}/${TS}_shaper.png"
+  echo "X GRAPH: http://${HOST}:${PORT}/results/${PRINTER}/${TS}_shaper_x.png"
+  echo "Y GRAPH: http://${HOST}:${PORT}/results/${PRINTER}/${TS}_shaper_y.png"
   echo "==========================================="
 else
   echo "ERROR: Files not ready after ${TIMEOUT}s"

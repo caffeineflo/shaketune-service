@@ -45,8 +45,8 @@ def get_all_results() -> Dict[str, Dict[str, List[Dict[str, str]]]]:
     if not os.path.exists(RESULTS_DIR):
         return results
 
-    # Pattern to match result files: YYYYMMDD_HHMMSS_type.png
-    pattern = re.compile(r'^(\d{8}_\d{6})_(shaper|belts|vibrations)\.png$')
+    # Pattern to match result files: YYYYMMDD_HHMMSS_type.png or YYYYMMDD_HHMMSS_type_axis.png
+    pattern = re.compile(r'^(\d{8}_\d{6})_(shaper|belts|vibrations)(?:_\w+)?\.png$')
 
     for printer_name in os.listdir(RESULTS_DIR):
         printer_path = os.path.join(RESULTS_DIR, printer_name)
@@ -190,16 +190,30 @@ async def analyze_shaper(
 
     with tempfile.TemporaryDirectory() as tmpdir:
         csv_paths = await save_uploaded_files(upload_files, tmpdir)
-        output_png = os.path.join(tmpdir, "shaper.png")
-
         extra_args = ["--max_freq", str(max_freq), "--scv", str(scv)]
-        run_graph_cli("input_shaper", csv_paths, output_png, extra_args)
 
-        final_name = f"{ts}_shaper.png"
-        final_path = os.path.join(printer_dir, final_name)
-        shutil.move(output_png, final_path)
+        # The shaketune CLI only processes one axis per invocation, so run
+        # each CSV separately and return per-axis results.
+        results = []
+        for csv_path in csv_paths:
+            # Derive axis label from filename (e.g. raw_data_x_x.csv -> x)
+            basename = os.path.basename(csv_path).lower()
+            if "_x_" in basename or "_x." in basename or basename.startswith("x"):
+                axis = "x"
+            elif "_y_" in basename or "_y." in basename or basename.startswith("y"):
+                axis = "y"
+            else:
+                axis = os.path.splitext(basename)[0].split("_")[-1]
 
-    return {"url": f"/results/{printer}/{final_name}", "type": "shaper", "printer": printer}
+            output_png = os.path.join(tmpdir, f"shaper_{axis}.png")
+            run_graph_cli("input_shaper", [csv_path], output_png, extra_args)
+
+            final_name = f"{ts}_shaper_{axis}.png"
+            final_path = os.path.join(printer_dir, final_name)
+            shutil.move(output_png, final_path)
+            results.append({"url": f"/results/{printer}/{final_name}", "axis": axis})
+
+    return {"urls": results, "type": "shaper", "printer": printer}
 
 
 @app.post("/belts")
@@ -294,12 +308,16 @@ async def health():
 
 
 def get_latest_file(graph_type: str, printer: str = "default") -> Optional[str]:
-    """Find the most recent graph file of the given type for a printer."""
+    """Find the most recent graph file of the given type for a printer.
+
+    Matches filenames like TS_shaper.png, TS_shaper_x.png, TS_belts.png, etc.
+    """
     try:
         printer_dir = os.path.join(RESULTS_DIR, printer)
         if not os.path.exists(printer_dir):
             return None
-        files = [f for f in os.listdir(printer_dir) if f.endswith(f"_{graph_type}.png")]
+        pattern = re.compile(rf'^\d{{8}}_\d{{6}}_{re.escape(graph_type)}(_\w+)?\.png$')
+        files = [f for f in os.listdir(printer_dir) if pattern.match(f)]
         if not files:
             return None
         # Files are named with timestamp prefix, so sorting gives chronological order

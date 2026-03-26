@@ -12,12 +12,19 @@ class TestLatestEndpoints:
         resp = client.get('/latest/invalid', follow_redirects=False)
         assert resp.status_code == 400
 
-    def test_redirect_to_latest(self, client, results_dir):
-        create_result_file(results_dir, 'default', '20260325_100000_shaper.png')
-        create_result_file(results_dir, 'default', '20260325_120000_shaper.png')
+    def test_redirect_to_latest_shaper(self, client, results_dir):
+        create_result_file(results_dir, 'default', '20260325_100000_shaper_x.png')
+        create_result_file(results_dir, 'default', '20260325_120000_shaper_x.png')
         resp = client.get('/latest/shaper', follow_redirects=False)
         assert resp.status_code == 302
-        assert '20260325_120000_shaper.png' in resp.headers['location']
+        assert '20260325_120000_shaper_x.png' in resp.headers['location']
+
+    def test_redirect_to_latest_belts(self, client, results_dir):
+        create_result_file(results_dir, 'default', '20260325_100000_belts.png')
+        create_result_file(results_dir, 'default', '20260325_120000_belts.png')
+        resp = client.get('/latest/belts', follow_redirects=False)
+        assert resp.status_code == 302
+        assert '20260325_120000_belts.png' in resp.headers['location']
 
     def test_printer_specific_latest(self, client, results_dir):
         create_result_file(results_dir, 'k1v3', '20260325_100000_belts.png')
@@ -26,15 +33,15 @@ class TestLatestEndpoints:
         assert '/results/k1v3/' in resp.headers['location']
 
     def test_returns_most_recent(self, client, results_dir):
-        create_result_file(results_dir, 'default', '20260325_080000_shaper.png')
-        create_result_file(results_dir, 'default', '20260325_160000_shaper.png')
-        create_result_file(results_dir, 'default', '20260325_120000_shaper.png')
+        create_result_file(results_dir, 'default', '20260325_080000_shaper_x.png')
+        create_result_file(results_dir, 'default', '20260325_160000_shaper_y.png')
+        create_result_file(results_dir, 'default', '20260325_120000_shaper_x.png')
         resp = client.get('/latest/shaper', follow_redirects=False)
         assert resp.status_code == 302
-        assert '20260325_160000_shaper.png' in resp.headers['location']
+        assert '20260325_160000_shaper_y.png' in resp.headers['location']
 
     def test_printer_invalid_type_returns_400(self, client, results_dir):
-        create_result_file(results_dir, 'k1v3', '20260325_100000_shaper.png')
+        create_result_file(results_dir, 'k1v3', '20260325_100000_shaper_x.png')
         resp = client.get('/latest/k1v3/invalid', follow_redirects=False)
         assert resp.status_code == 400
 
