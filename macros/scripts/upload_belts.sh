@@ -5,6 +5,7 @@
 HOST="${1:-192.168.1.100}"
 PORT="${2:-8080}"
 PRINTER="${3:-default}"
+BASE_URL="${BASE_URL:-http://${HOST}:${PORT}}"
 
 FILE_A="/tmp/raw_data_axis=1.000,-1.000_a.csv"
 FILE_B="/tmp/raw_data_axis=1.000,1.000_b.csv"
@@ -44,7 +45,7 @@ if [ "$SIZE_A" -gt 1000000 ] && [ "$SIZE_B" -gt 1000000 ]; then
 
   echo ""
   echo "==========================================="
-  echo "BELTS GRAPH: http://${HOST}:${PORT}/results/${PRINTER}/${TS}_belts.png"
+  echo "BELTS GRAPH: ${BASE_URL}/results/${PRINTER}/${TS}_belts.png"
   echo "==========================================="
 else
   echo "ERROR: Files not ready after ${TIMEOUT}s"

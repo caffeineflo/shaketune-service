@@ -5,6 +5,7 @@
 HOST="${1:-192.168.1.100}"
 PORT="${2:-8080}"
 PRINTER="${3:-default}"
+BASE_URL="${BASE_URL:-http://${HOST}:${PORT}}"
 
 FILE_X="/tmp/raw_data_x_x.csv"
 FILE_Y="/tmp/raw_data_y_y.csv"
@@ -43,8 +44,8 @@ if [ "$SIZE_X" -gt 1000000 ] && [ "$SIZE_Y" -gt 1000000 ]; then
 
   echo ""
   echo "==========================================="
-  echo "X GRAPH: http://${HOST}:${PORT}/results/${PRINTER}/${TS}_shaper_x.png"
-  echo "Y GRAPH: http://${HOST}:${PORT}/results/${PRINTER}/${TS}_shaper_y.png"
+  echo "X GRAPH: ${BASE_URL}/results/${PRINTER}/${TS}_shaper_x.png"
+  echo "Y GRAPH: ${BASE_URL}/results/${PRINTER}/${TS}_shaper_y.png"
   echo "==========================================="
 else
   echo "ERROR: Files not ready after ${TIMEOUT}s"

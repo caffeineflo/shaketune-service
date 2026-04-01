@@ -2,10 +2,11 @@
 # Install Shake&Tune Remote macros on a Creality K1/K1C/K1 Max
 #
 # Run on the K1 via SSH:
-#   sh install.sh <server_host> <server_port> <printer_name>
+#   sh install.sh <server_host> <server_port> <printer_name> [base_url]
 #
 # Example:
 #   sh install.sh 192.168.40.11 3080 k1v3
+#   sh install.sh 192.168.40.11 3080 k1v3 https://shaketune.iflorian.com
 #
 # What this does:
 #   1. Copies scripts to /usr/data/printer_data/config/shaketune/scripts/
@@ -15,9 +16,10 @@
 
 set -e
 
-HOST="${1:?Usage: install.sh <host> <port> <printer_name>}"
-PORT="${2:?Usage: install.sh <host> <port> <printer_name>}"
-PRINTER="${3:?Usage: install.sh <host> <port> <printer_name>}"
+HOST="${1:?Usage: install.sh <host> <port> <printer_name> [base_url]}"
+PORT="${2:?Usage: install.sh <host> <port> <printer_name> [base_url]}"
+PRINTER="${3:?Usage: install.sh <host> <port> <printer_name> [base_url]}"
+BASE_URL="${4:-http://${HOST}:${PORT}}"
 
 CONFIG_DIR="/usr/data/printer_data/config"
 SCRIPTS_DIR="${CONFIG_DIR}/shaketune/scripts"
@@ -28,8 +30,9 @@ PRINTER_CFG="${CONFIG_DIR}/printer.cfg"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "=== Shake&Tune Remote Installer ==="
-echo "Server:  ${HOST}:${PORT}"
-echo "Printer: ${PRINTER}"
+echo "Server:   ${HOST}:${PORT}"
+echo "Base URL: ${BASE_URL}"
+echo "Printer:  ${PRINTER}"
 echo ""
 
 # 1. Copy scripts
@@ -65,13 +68,14 @@ description: Configuration for remote Shake&Tune service
 variable_host: "${HOST}"
 variable_port: "${PORT}"
 variable_printer: "${PRINTER}"
+variable_base_url: "${BASE_URL}"
 gcode:
   # This macro just holds configuration variables
 
 
 # Shell command for shaper upload
 [gcode_shell_command shaketune_upload_shaper_remote]
-command: sh ${SCRIPTS_DIR}/upload_shaper.sh ${HOST} ${PORT} ${PRINTER}
+command: sh -c 'BASE_URL=${BASE_URL} sh ${SCRIPTS_DIR}/upload_shaper.sh ${HOST} ${PORT} ${PRINTER}'
 timeout: 120
 verbose: True
 
@@ -79,7 +83,7 @@ verbose: True
 # (must be detached via setsid because the script does a firmware restart
 # mid-run, which would kill a Klipper-owned child process)
 [gcode_shell_command shaketune_run_belts_remote]
-command: sh -c 'setsid sh ${SCRIPTS_DIR}/run_belts.sh ${HOST} ${PORT} ${PRINTER} > /tmp/shaketune_belts.log 2>&1 &'
+command: sh -c 'setsid sh -c "BASE_URL=${BASE_URL} sh ${SCRIPTS_DIR}/run_belts.sh ${HOST} ${PORT} ${PRINTER}" > /tmp/shaketune_belts.log 2>&1 &'
 timeout: 10
 verbose: True
 
@@ -162,4 +166,4 @@ echo "  SHAKETUNE_SHAPER_REMOTE   - Input shaper graphs"
 echo "  SHAKETUNE_BELTS_REMOTE    - Belt comparison graph"
 echo "  SHAKETUNE_EXCITE_REMOTE   - Vibrate at frequency"
 echo ""
-echo "Results at: http://${HOST}:${PORT}/"
+echo "Results at: ${BASE_URL}/"
