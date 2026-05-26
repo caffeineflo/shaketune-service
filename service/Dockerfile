@@ -22,6 +22,7 @@ COPY service/klipper /app/service/klipper/
 
 # Copy server and templates
 COPY service/server.py /app/service/
+COPY service/telemetry.py /app/service/
 COPY service/templates /app/service/templates/
 
 # Create results directory
