@@ -11,6 +11,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, RedirectResponse, FileResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
+from opentelemetry import trace
 import subprocess
 import os
 import shutil
@@ -19,6 +20,8 @@ import re
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pathlib import Path
+
+from service.telemetry import tracer
 
 app = FastAPI(
     title="Shake&Tune Analysis Service",
@@ -106,12 +109,18 @@ def run_graph_cli(graph_type: str, csv_paths: List[str], output_path: str, extra
     env = os.environ.copy()
     env["PYTHONPATH"] = "/app"
 
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd="/app")
-    if result.returncode != 0:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Analysis failed: {result.stderr or result.stdout}"
-        )
+    with tracer.start_as_current_span(
+        "analysis.run_graph_cli",
+        attributes={"analysis.type": graph_type, "analysis.file_count": len(csv_paths)},
+    ) as s:
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd="/app")
+        s.set_attribute("subprocess.returncode", result.returncode)
+        if result.returncode != 0:
+            s.set_status(trace.StatusCode.ERROR, result.stderr[:500] if result.stderr else "unknown error")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Analysis failed: {result.stderr or result.stdout}"
+            )
     return True
 
 

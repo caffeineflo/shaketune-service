@@ -9,7 +9,10 @@ WORKDIR /app
 # Install Python dependencies
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir fastapi uvicorn python-multipart jinja2
+    pip install --no-cache-dir fastapi uvicorn python-multipart jinja2 && \
+    pip install --no-cache-dir opentelemetry-distro opentelemetry-exporter-otlp \
+        opentelemetry-instrumentation-fastapi opentelemetry-instrumentation-logging \
+        opentelemetry-api
 
 # Copy Shake&Tune module
 COPY shaketune /app/shaketune/
@@ -33,4 +36,4 @@ EXPOSE 8080
 
 VOLUME /app/results
 
-CMD ["uvicorn", "service.server:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["opentelemetry-instrument", "uvicorn", "service.server:app", "--host", "0.0.0.0", "--port", "8080"]
