@@ -5,8 +5,8 @@
 #   sh install.sh <server_host> <server_port> <printer_name> [base_url]
 #
 # Example:
-#   sh install.sh 192.168.40.11 3080 k1v3
-#   sh install.sh 192.168.40.11 3080 k1v3 https://shaketune.iflorian.com
+#   sh install.sh shaketune.iflorian.com 3080 k1v3
+#   sh install.sh shaketune.iflorian.com 3080 k1v3 http://shaketune.iflorian.com:3080
 #
 # What this does:
 #   1. Copies scripts to /usr/data/printer_data/config/shaketune/scripts/

@@ -6,6 +6,7 @@ HOST="${1:-192.168.1.100}"
 PORT="${2:-8080}"
 PRINTER="${3:-default}"
 BASE_URL="${BASE_URL:-http://${HOST}:${PORT}}"
+UPLOAD_URL="${BASE_URL%/}"
 
 FILE_A="/tmp/raw_data_axis=1.000,-1.000_a.csv"
 FILE_B="/tmp/raw_data_axis=1.000,1.000_b.csv"
@@ -34,11 +35,16 @@ if [ "$SIZE_A" -gt 1000000 ] && [ "$SIZE_B" -gt 1000000 ]; then
   gzip -f -k "$FILE_B"
 
   echo "Uploading to service..."
-  curl -X POST "http://${HOST}:${PORT}/belts" \
+  curl -X POST "${UPLOAD_URL}/belts" \
     -F "file_a=@${FILE_A}.gz" \
     -F "file_b=@${FILE_B}.gz" \
     -F "printer=${PRINTER}" \
-    -F "timestamp=${TS}" 2>/dev/null
+    -F "timestamp=${TS}" || {
+      STATUS=$?
+      rm -f "${FILE_A}.gz" "${FILE_B}.gz"
+      echo "ERROR: Upload failed with status ${STATUS}"
+      exit "$STATUS"
+    }
 
   # Cleanup compressed files
   rm -f "${FILE_A}.gz" "${FILE_B}.gz"

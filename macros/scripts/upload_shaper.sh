@@ -6,6 +6,7 @@ HOST="${1:-192.168.1.100}"
 PORT="${2:-8080}"
 PRINTER="${3:-default}"
 BASE_URL="${BASE_URL:-http://${HOST}:${PORT}}"
+UPLOAD_URL="${BASE_URL%/}"
 
 FILE_X="/tmp/raw_data_x_x.csv"
 FILE_Y="/tmp/raw_data_y_y.csv"
@@ -32,11 +33,16 @@ if [ "$SIZE_X" -gt 1000000 ] && [ "$SIZE_Y" -gt 1000000 ]; then
   gzip -f -k "$FILE_Y"
 
   echo "Uploading to service..."
-  RESPONSE=$(curl -X POST "http://${HOST}:${PORT}/shaper" \
+  RESPONSE=$(curl -X POST "${UPLOAD_URL}/shaper" \
     -F "file_x=@${FILE_X}.gz" \
     -F "file_y=@${FILE_Y}.gz" \
     -F "printer=${PRINTER}" \
-    -F "timestamp=${TS}" 2>/dev/null)
+    -F "timestamp=${TS}") || {
+      STATUS=$?
+      rm -f "${FILE_X}.gz" "${FILE_Y}.gz"
+      echo "ERROR: Upload failed with status ${STATUS}"
+      exit "$STATUS"
+    }
   echo "$RESPONSE"
 
   # Cleanup compressed files

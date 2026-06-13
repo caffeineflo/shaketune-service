@@ -3,7 +3,7 @@ services:
     image: ghcr.io/caffeineflo/shaketune-service:latest
     container_name: shaketune-service
     ports:
-      - "8080:8080"
+      - "3080:8080"
     volumes:
       - shaketune-results:/app/results
     restart: unless-stopped

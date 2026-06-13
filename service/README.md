@@ -34,7 +34,7 @@ SSH into your K1 and run the installer. You need the `macros/` directory from th
 cd /tmp
 wget -O install.tar.gz https://github.com/caffeineflo/shaketune-service/archive/refs/heads/main.tar.gz
 tar xzf install.tar.gz --strip-components=2 shaketune-service-main/macros
-sh install.sh 192.168.40.11 3080 k1v3
+sh install.sh shaketune.iflorian.com 3080 k1v3 http://shaketune.iflorian.com:3080
 ```
 
 The installer:
@@ -71,10 +71,10 @@ Vibrates at a specific frequency for a set duration to locate resonance sources.
 Run the installer on each K1 with a unique printer name:
 ```bash
 # On K1v3
-sh install.sh 192.168.40.11 3080 k1v3
+sh install.sh shaketune.iflorian.com 3080 k1v3 http://shaketune.iflorian.com:3080
 
 # On K1v4
-sh install.sh 192.168.40.11 3080 k1v4
+sh install.sh shaketune.iflorian.com 3080 k1v4 http://shaketune.iflorian.com:3080
 ```
 
 Each printer gets its own subdirectory in results:
