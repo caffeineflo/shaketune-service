@@ -14,7 +14,7 @@
 #   3. Adds [include shaketune.cfg] to printer.cfg if not already present
 #   4. Prompts you to restart Klipper
 
-set -e
+set -eu
 
 HOST="${1:?Usage: install.sh <host> <port> <printer_name> [base_url]}"
 PORT="${2:?Usage: install.sh <host> <port> <printer_name> [base_url]}"
@@ -25,6 +25,7 @@ CONFIG_DIR="/usr/data/printer_data/config"
 SCRIPTS_DIR="${CONFIG_DIR}/shaketune/scripts"
 CFG_FILE="${CONFIG_DIR}/shaketune.cfg"
 PRINTER_CFG="${CONFIG_DIR}/printer.cfg"
+TOKEN_FILE="${CONFIG_DIR}/shaketune/token"
 
 # Detect script source directory (where this install.sh lives)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -35,17 +36,35 @@ echo "Base URL: ${BASE_URL}"
 echo "Printer:  ${PRINTER}"
 echo ""
 
+case "$PRINTER" in
+  ''|*[!A-Za-z0-9_-]*)
+    echo "ERROR: Printer name may contain only letters, numbers, underscores, and hyphens"
+    exit 1
+    ;;
+esac
+
+if [ ! -s "$TOKEN_FILE" ]; then
+  echo "ERROR: Install the service token at ${TOKEN_FILE} before running this installer"
+  exit 1
+fi
+chmod 600 "$TOKEN_FILE"
+
 # 1. Copy scripts
 echo "[1/3] Installing scripts..."
 mkdir -p "${SCRIPTS_DIR}"
 cp "${SCRIPT_DIR}/scripts/upload_shaper.sh" "${SCRIPTS_DIR}/"
 cp "${SCRIPT_DIR}/scripts/upload_belts.sh" "${SCRIPTS_DIR}/"
+cp "${SCRIPT_DIR}/scripts/firmware_restart.sh" "${SCRIPTS_DIR}/"
+cp "${SCRIPT_DIR}/scripts/run_shaper.sh" "${SCRIPTS_DIR}/"
 cp "${SCRIPT_DIR}/scripts/run_belts.sh" "${SCRIPTS_DIR}/"
 chmod +x "${SCRIPTS_DIR}"/*.sh
 echo "  -> ${SCRIPTS_DIR}/"
 
 # 2. Generate shaketune.cfg with printer-specific values
 echo "[2/3] Generating ${CFG_FILE}..."
+if [ -f "$CFG_FILE" ]; then
+  cp "$CFG_FILE" "${CFG_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
+fi
 cat > "${CFG_FILE}" << ENDCFG
 ########################################
 # Shake&Tune Remote Service Macros
@@ -73,10 +92,11 @@ gcode:
   # This macro just holds configuration variables
 
 
-# Shell command for shaper upload
-[gcode_shell_command shaketune_upload_shaper_remote]
-command: sh -c 'BASE_URL=${BASE_URL} sh ${SCRIPTS_DIR}/upload_shaper.sh ${HOST} ${PORT} ${PRINTER}'
-timeout: 120
+# Shell command for shaper calibration. The detached orchestrator survives the
+# firmware restarts required between K1 resonance sweeps.
+[gcode_shell_command shaketune_run_shaper_remote]
+command: sh -c 'setsid sh -c "BASE_URL=${BASE_URL} sh ${SCRIPTS_DIR}/run_shaper.sh ${HOST} ${PORT} ${PRINTER}" > /tmp/shaketune_shaper.log 2>&1 &'
+timeout: 10
 verbose: True
 
 # Shell command for belts - launches orchestrator detached from Klipper
@@ -91,20 +111,14 @@ verbose: True
 [gcode_macro SHAKETUNE_SHAPER_REMOTE]
 description: Run input shaper calibration and generate analysis graph via remote service
 gcode:
-  {% if printer.toolhead.homed_axes != "xyz" %}
-    RESPOND MSG="Homing..."
-    G28
+  {% if printer.print_stats.state != "standby" %}
+    RESPOND TYPE=error MSG="ShakeTune refused: printer is not in standby"
+  {% elif printer.extruder.target|float != 0 or printer.heater_bed.target|float != 0 %}
+    RESPOND TYPE=error MSG="ShakeTune refused: a heater target is active"
+  {% else %}
+    RESPOND MSG="Starting remote input shaper workflow. Progress: /tmp/shaketune_shaper.log"
+    RUN_SHELL_COMMAND CMD=shaketune_run_shaper_remote
   {% endif %}
-  G0 X{printer.toolhead.axis_maximum.x / 2} Y{printer.toolhead.axis_maximum.y / 2} Z50 F6000
-  RESPOND MSG="Testing X axis resonances..."
-  TEST_RESONANCES AXIS=X OUTPUT=raw_data NAME=x
-  M400
-  RESPOND MSG="Testing Y axis resonances..."
-  TEST_RESONANCES AXIS=Y OUTPUT=raw_data NAME=y
-  M400
-  RESPOND MSG="Uploading to remote Shake&Tune service..."
-  RUN_SHELL_COMMAND CMD=shaketune_upload_shaper_remote
-  RESPOND MSG="Analysis complete! Check console for graph URL."
 
 
 [gcode_macro SHAKETUNE_BELTS_REMOTE]
@@ -112,11 +126,17 @@ description: Run belt comparison test and generate analysis graph via remote ser
 gcode:
   # The belt test is fully orchestrated by a shell script via Moonraker API.
   # It runs Belt A, does a firmware restart (to avoid K1 move queue overflow
-  # with raw data), re-homes, runs Belt B, then uploads both CSVs.
+  # with raw data), re-homes, runs Belt B, restarts again, then uploads both
+  # CSVs. Each restart must clear homed_axes before the workflow continues.
   # Progress is logged to /tmp/shaketune_belts.log
-  RESPOND MSG="Starting belt comparison (with firmware restart between sweeps)..."
-  RESPOND MSG="This will take ~6 minutes. Progress is in /tmp/shaketune_belts.log"
-  RUN_SHELL_COMMAND CMD=shaketune_run_belts_remote
+  {% if printer.print_stats.state != "standby" %}
+    RESPOND TYPE=error MSG="ShakeTune refused: printer is not in standby"
+  {% elif printer.extruder.target|float != 0 or printer.heater_bed.target|float != 0 %}
+    RESPOND TYPE=error MSG="ShakeTune refused: a heater target is active"
+  {% else %}
+    RESPOND MSG="Starting belt comparison. Progress: /tmp/shaketune_belts.log"
+    RUN_SHELL_COMMAND CMD=shaketune_run_belts_remote
+  {% endif %}
 
 
 [gcode_macro SHAKETUNE_EXCITE_REMOTE]
@@ -130,15 +150,21 @@ gcode:
   {% elif axis == "b" %}
     {% set axis = "1,1" %}
   {% endif %}
-  {% if printer.toolhead.homed_axes != "xyz" %}
-    RESPOND MSG="Homing..."
-    G28
+  {% if printer.print_stats.state != "standby" %}
+    RESPOND TYPE=error MSG="ShakeTune refused: printer is not in standby"
+  {% elif printer.extruder.target|float != 0 or printer.heater_bed.target|float != 0 %}
+    RESPOND TYPE=error MSG="ShakeTune refused: a heater target is active"
+  {% else %}
+    {% if printer.toolhead.homed_axes != "xyz" %}
+      RESPOND MSG="Homing..."
+      G28
+    {% endif %}
+    G0 X{printer.toolhead.axis_maximum.x / 2} Y{printer.toolhead.axis_maximum.y / 2} Z50 F6000
+    RESPOND MSG="Exciting {axis} axis at {frequency}Hz for {duration}s..."
+    TEST_RESONANCES OUTPUT=raw_data AXIS={axis} FREQ_START={frequency - 1} FREQ_END={frequency + 1} HZ_PER_SEC={1 / (duration / 3)}
+    M400
+    RESPOND MSG="Done."
   {% endif %}
-  G0 X{printer.toolhead.axis_maximum.x / 2} Y{printer.toolhead.axis_maximum.y / 2} Z50 F6000
-  RESPOND MSG="Exciting {axis} axis at {frequency}Hz for {duration}s..."
-  TEST_RESONANCES OUTPUT=raw_data AXIS={axis} FREQ_START={frequency - 1} FREQ_END={frequency + 1} HZ_PER_SEC={1 / (duration / 3)}
-  M400
-  RESPOND MSG="Done."
 ENDCFG
 echo "  -> ${CFG_FILE}"
 

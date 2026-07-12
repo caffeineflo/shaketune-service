@@ -1,0 +1,13 @@
+.git
+.github
+/secrets/
+.pytest_cache
+.ruff_cache
+**/__pycache__
+*.pyc
+ci
+docs
+macros
+tests
+OWNERSHIP
+docker-compose.yml

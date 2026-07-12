@@ -7,47 +7,83 @@
 #   2. Firmware restart (clears move queue)
 #   3. Wait for Klipper ready
 #   4. Home + center + run Belt B
-#   5. Upload both CSVs to shaketune service
+#   5. Firmware restart (leaves the printer ready with a clear move queue)
+#   6. Upload both CSVs to shaketune service
 #
 # Must be launched detached from Klipper (via setsid) because the
 # firmware restart would kill a Klipper-owned child process.
 #
 # Usage: run_belts.sh HOST PORT PRINTER [FREQ_START] [FREQ_END] [HZ_PER_SEC]
 
+set -eu
+
 HOST="${1:-192.168.1.100}"
 PORT="${2:-8080}"
 PRINTER="${3:-default}"
 BASE_URL="${BASE_URL:-http://${HOST}:${PORT}}"
-UPLOAD_URL="${BASE_URL%/}"
 FREQ_START="${4:-5}"
 FREQ_END="${5:-133.33}"
 HZ_PER_SEC="${6:-1}"
 
-FILE_A="/tmp/raw_data_axis=1.000,-1.000_a.csv"
-FILE_B="/tmp/raw_data_axis=1.000,1.000_b.csv"
+FILE_A="${SHAKETUNE_BELT_FILE_A:-/tmp/raw_data_axis=1.000,-1.000_a.csv}"
+FILE_B="${SHAKETUNE_BELT_FILE_B:-/tmp/raw_data_axis=1.000,1.000_b.csv}"
+TOKEN_FILE="${SHAKETUNE_TOKEN_FILE:-/usr/data/printer_data/config/shaketune/token}"
+LOCK_DIR="${SHAKETUNE_LOCK_DIR:-/tmp/shaketune_calibration.lock}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+MOONRAKER_URL="${MOONRAKER_URL:-http://localhost:7125}"
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  echo "ERROR: Another ShakeTune calibration workflow is already running"
+  exit 1
+fi
+trap 'rm -rf "$LOCK_DIR"' EXIT HUP INT TERM
+
+moonraker_get() {
+  wget -q -O - -T 10 "${MOONRAKER_URL%/}/$1" 2>/dev/null
+}
 
 # Helper: send gcode via Moonraker
 send_gcode() {
-  ENCODED=$(echo "$1" | sed 's/ /%20/g; s/=/%3D/g; s/,/%2C/g')
-  wget -q -O /dev/null "http://localhost:7125/printer/gcode/script?script=${ENCODED}" 2>/dev/null
+  ENCODED=$(printf '%s' "$1" | sed 's/%/%25/g; s/ /%20/g; s/"/%22/g; s/=/%3D/g; s/,/%2C/g')
+  if ! wget -q -O /dev/null -T 360 "${MOONRAKER_URL%/}/printer/gcode/script?script=${ENCODED}" 2>/dev/null; then
+    echo "ERROR: Moonraker rejected or timed out while running: $1"
+    return 1
+  fi
 }
 
-# Helper: wait for Klipper to reach "ready" state
-wait_ready() {
-  TIMEOUT=60
-  COUNT=0
-  while [ $COUNT -lt $TIMEOUT ]; do
-    STATE=$(wget -q -O - "http://localhost:7125/printer/info" 2>/dev/null)
-    case "$STATE" in
-      *'"state": "ready"'*|*'"state":"ready"'*)
-        return 0
-        ;;
-    esac
-    sleep 2
-    COUNT=$((COUNT + 2))
+firmware_restart() {
+  echo "Restarting Klipper to clear the K1 move queue"
+  sh "${SCRIPT_DIR}/firmware_restart.sh"
+}
+
+numeric_zero() {
+  awk -v value="$1" 'BEGIN { exit !(value == 0) }'
+}
+
+require_idle_and_cold() {
+  PRINT_JSON=$(moonraker_get 'printer/objects/query?print_stats') || {
+    echo "ERROR: Cannot read print state from Moonraker"
+    return 1
+  }
+  case "$PRINT_JSON" in
+    *'"state": "standby"'*|*'"state":"standby"'*) ;;
+    *)
+      echo "ERROR: Printer is not in standby; refusing calibration motion"
+      return 1
+      ;;
+  esac
+
+  for HEATER in extruder heater_bed; do
+    HEATER_JSON=$(moonraker_get "printer/objects/query?${HEATER}") || {
+      echo "ERROR: Cannot read ${HEATER} state from Moonraker"
+      return 1
+    }
+    TARGET=$(printf '%s\n' "$HEATER_JSON" | sed -n 's/.*"target": \([-0-9.]*\).*/\1/p')
+    if [ -z "$TARGET" ] || ! numeric_zero "$TARGET"; then
+      echo "ERROR: ${HEATER} target is ${TARGET:-unknown}; refusing calibration motion"
+      return 1
+    fi
   done
-  echo "ERROR: Klipper not ready after ${TIMEOUT}s"
-  return 1
 }
 
 # Helper: wait for a CSV file to appear and stabilize (stop growing)
@@ -79,8 +115,19 @@ wait_for_csv() {
   return 1
 }
 
+if [ ! -r "$TOKEN_FILE" ]; then
+  echo "ERROR: ShakeTune token is missing or unreadable: $TOKEN_FILE"
+  exit 1
+fi
+TOKEN="$(tr -d '\r\n' < "$TOKEN_FILE")"
+if [ -z "$TOKEN" ]; then
+  echo "ERROR: ShakeTune token is empty: $TOKEN_FILE"
+  exit 1
+fi
+
 # Clean up old files
 rm -f "$FILE_A" "$FILE_B"
+require_idle_and_cold
 
 echo "=== Belt A (1,-1) ==="
 echo "Homing..."
@@ -93,8 +140,7 @@ echo "Running Belt A resonance test..."
 send_gcode "TEST_RESONANCES AXIS=1,-1 OUTPUT=raw_data NAME=a FREQ_START=${FREQ_START} FREQ_END=${FREQ_END} HZ_PER_SEC=${HZ_PER_SEC}"
 
 echo "Waiting for Belt A CSV..."
-SIZE_A=$(wait_for_csv "$FILE_A")
-if [ "$SIZE_A" = "0" ]; then
+if ! SIZE_A=$(wait_for_csv "$FILE_A"); then
   echo "ERROR: Belt A CSV not ready"
   exit 1
 fi
@@ -102,10 +148,8 @@ echo "Belt A complete: ${SIZE_A} bytes"
 
 echo ""
 echo "=== Firmware Restart ==="
-wget -q -O /dev/null "http://localhost:7125/printer/firmware_restart" 2>/dev/null
-sleep 5
-echo "Waiting for Klipper..."
-wait_ready || exit 1
+firmware_restart
+require_idle_and_cold
 echo "Klipper ready"
 
 echo ""
@@ -120,39 +164,19 @@ echo "Running Belt B resonance test..."
 send_gcode "TEST_RESONANCES AXIS=1,1 OUTPUT=raw_data NAME=b FREQ_START=${FREQ_START} FREQ_END=${FREQ_END} HZ_PER_SEC=${HZ_PER_SEC}"
 
 echo "Waiting for Belt B CSV..."
-SIZE_B=$(wait_for_csv "$FILE_B")
-if [ "$SIZE_B" = "0" ]; then
+if ! SIZE_B=$(wait_for_csv "$FILE_B"); then
   echo "ERROR: Belt B CSV not ready"
   exit 1
 fi
 echo "Belt B complete: ${SIZE_B} bytes"
 
 echo ""
-echo "=== Upload ==="
-TS=$(date +%Y%m%d_%H%M%S)
-
-# Compress files for faster upload
-echo "Compressing files..."
-gzip -f -k "$FILE_A"
-gzip -f -k "$FILE_B"
-
-echo "Uploading to service..."
-curl -X POST "${UPLOAD_URL}/belts" \
-  -F "file_a=@${FILE_A}.gz" \
-  -F "file_b=@${FILE_B}.gz" \
-  -F "printer=${PRINTER}" \
-  -F "timestamp=${TS}" || {
-    STATUS=$?
-    rm -f "${FILE_A}.gz" "${FILE_B}.gz"
-    echo "ERROR: Upload failed with status ${STATUS}"
-    exit "$STATUS"
-  }
-
-# Cleanup
-rm -f "${FILE_A}.gz" "${FILE_B}.gz"
+echo "=== Final Firmware Restart ==="
+firmware_restart
+require_idle_and_cold
+echo "Klipper ready"
 
 echo ""
-echo "==========================================="
-echo "BELTS GRAPH: ${BASE_URL}/results/${PRINTER}/${TS}_belts.png"
-echo "==========================================="
+echo "=== Upload ==="
+BASE_URL="$BASE_URL" sh "${SCRIPT_DIR}/upload_belts.sh" "$HOST" "$PORT" "$PRINTER"
 echo "Done!"

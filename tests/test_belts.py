@@ -64,3 +64,20 @@ class TestBeltsEndpoint:
         ])
         assert resp.status_code == 500
         assert 'Analysis failed' in resp.json()['detail']
+
+    def test_three_files_returns_400(self, client, mock_cli):
+        csv = make_csv_bytes()
+        resp = client.post('/belts', files=[
+            ('files', ('raw_data_a.csv', csv, 'text/csv')),
+            ('files', ('raw_data_b.csv', csv, 'text/csv')),
+            ('files', ('raw_data_c.csv', csv, 'text/csv')),
+        ])
+        assert resp.status_code == 400
+
+    def test_duplicate_output_filename_returns_400(self, client, mock_cli):
+        csv = make_csv_bytes()
+        resp = client.post('/belts', files=[
+            ('files', ('raw_data_a.csv', csv, 'text/csv')),
+            ('files', ('raw_data_a.csv.gz', make_gzip_csv(), 'application/gzip')),
+        ])
+        assert resp.status_code == 400

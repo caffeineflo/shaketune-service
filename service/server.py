@@ -1,425 +1,718 @@
-"""
-Shake&Tune Analysis Service
+"""HTTP service for generating Shake&Tune analysis graphs."""
 
-A lightweight web service that processes Klipper accelerometer data
-and generates analysis graphs for input shaper calibration.
-
-Designed for use with Creality K1 and other Klipper-based printers.
-"""
-
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, RedirectResponse, FileResponse, HTMLResponse
-from fastapi.templating import Jinja2Templates
-from opentelemetry import trace
-import subprocess
+import asyncio
+import gzip
 import os
-import shutil
-import tempfile
 import re
-from typing import List, Optional, Dict, Any
+import secrets
+import shutil
+import subprocess
+import sys
+import tempfile
+import zlib
 from datetime import datetime
 from pathlib import Path
+from typing import Annotated, Any, Dict, List, Optional, Tuple
 
-from service.telemetry import tracer
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
 app = FastAPI(
-    title="Shake&Tune Analysis Service",
-    description="Process Klipper accelerometer data and generate calibration graphs",
-    version="1.0.0"
+    title='Shake&Tune Analysis Service',
+    description='Process Klipper accelerometer data and generate calibration graphs',
+    version='1.2.0',
 )
 
-RESULTS_DIR = os.environ.get("RESULTS_DIR", "/app/results")
-KLIPPER_DIR = os.environ.get("KLIPPER_DIR", "/app/service/klipper")
-SHAKETUNE_DIR = os.environ.get("SHAKETUNE_DIR", "/app/shaketune/graph_creators")
+RESULTS_DIR = os.environ.get('RESULTS_DIR', '/app/results')
+KLIPPER_DIR = os.environ.get('KLIPPER_DIR', '/app/service/klipper')
+APP_DIR = os.environ.get('APP_DIR', '/app')
 
-os.makedirs(RESULTS_DIR, exist_ok=True)
-app.mount("/results", StaticFiles(directory=RESULTS_DIR), name="results")
+_MEBIBYTE = 1024 * 1024
+UPLOAD_CHUNK_SIZE = _MEBIBYTE
+PRINTER_PATTERN = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z')
+TIMESTAMP_PATTERN = re.compile(r'\d{8}_\d{6}\Z')
+RESULT_PATTERN = re.compile(r'^(\d{8}_\d{6})_(shaper|belts|vibrations)(?:_\w+)?\.png$')
+TOKEN_HEADER = 'X-ShakeTune-Token'
+ANALYSIS_PATHS = frozenset({'/shaper', '/belts', '/vibrations'})
 
-# Templates setup
-TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+def _positive_int_from_env(name: str, default: int) -> int:
+    raw_value = os.environ.get(name, str(default))
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(f'{name} must be a positive integer') from exc
+    if value <= 0:
+        raise RuntimeError(f'{name} must be a positive integer')
+    return value
+
+
+MAX_UPLOAD_FILES = _positive_int_from_env('SHAKETUNE_MAX_UPLOAD_FILES', 16)
+MAX_UPLOAD_BYTES_PER_FILE = _positive_int_from_env('SHAKETUNE_MAX_UPLOAD_BYTES', 32 * _MEBIBYTE)
+MAX_DECOMPRESSED_BYTES_PER_FILE = _positive_int_from_env(
+    'SHAKETUNE_MAX_DECOMPRESSED_BYTES',
+    64 * _MEBIBYTE,
+)
+MAX_TOTAL_DECOMPRESSED_BYTES = _positive_int_from_env(
+    'SHAKETUNE_MAX_TOTAL_DECOMPRESSED_BYTES',
+    128 * _MEBIBYTE,
+)
+MAX_REQUEST_BODY_BYTES = _positive_int_from_env(
+    'SHAKETUNE_MAX_REQUEST_BODY_BYTES',
+    64 * _MEBIBYTE,
+)
+ANALYSIS_TIMEOUT_SECONDS = _positive_int_from_env('SHAKETUNE_ANALYSIS_TIMEOUT_SECONDS', 300)
+ANALYSIS_CONCURRENCY = _positive_int_from_env('SHAKETUNE_ANALYSIS_CONCURRENCY', 1)
+_ANALYSIS_SEMAPHORE = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
+
+
+def _load_api_token() -> str:
+    token = os.environ.get('SHAKETUNE_API_TOKEN')
+    token_file = os.environ.get('SHAKETUNE_API_TOKEN_FILE')
+
+    if token is None and token_file:
+        try:
+            token = Path(token_file).read_text(encoding='utf-8')
+        except OSError as exc:
+            raise RuntimeError('Unable to read SHAKETUNE_API_TOKEN_FILE') from exc
+
+    if token is None or not token.strip():
+        raise RuntimeError('Set SHAKETUNE_API_TOKEN or SHAKETUNE_API_TOKEN_FILE')
+
+    return token.strip()
+
+
+API_TOKEN = _load_api_token()
+
+
+def _valid_api_token(supplied_token: Optional[str]) -> bool:
+    supplied_bytes = supplied_token.encode('utf-8') if supplied_token is not None else b''
+    return secrets.compare_digest(supplied_bytes, API_TOKEN.encode('utf-8'))
+
+
+class RequestBodyTooLarge(Exception):
+    """The incoming HTTP request exceeded the configured body limit."""
+
+
+class RequestBodyLimitMiddleware:
+    """Reject oversized analysis bodies while the ASGI server receives them."""
+
+    def __init__(self, app, max_body_bytes: int):
+        self.app = app
+        self.max_body_bytes = max_body_bytes
+
+    async def __call__(self, scope, receive, send):
+        if (
+            scope['type'] != 'http'
+            or scope.get('method') != 'POST'
+            or scope.get('path') not in ANALYSIS_PATHS
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        content_length = next(
+            (
+                value
+                for name, value in scope.get('headers', [])
+                if name.lower() == b'content-length'
+            ),
+            None,
+        )
+        if content_length is not None:
+            try:
+                declared_bytes = int(content_length)
+            except ValueError:
+                declared_bytes = 0
+            if declared_bytes > self.max_body_bytes:
+                await self._reject(scope, receive, send)
+                return
+
+        received_bytes = 0
+        body_too_large = False
+        response_started = False
+
+        async def receive_limited():
+            nonlocal body_too_large, received_bytes
+            message = await receive()
+            if message['type'] == 'http.request':
+                received_bytes += len(message.get('body', b''))
+                if received_bytes > self.max_body_bytes:
+                    body_too_large = True
+                    raise RequestBodyTooLarge
+            return message
+
+        async def send_limited(message):
+            nonlocal response_started
+            if body_too_large:
+                return
+            if message['type'] == 'http.response.start':
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive_limited, send_limited)
+        except RequestBodyTooLarge:
+            body_too_large = True
+
+        if body_too_large:
+            if response_started:
+                raise RuntimeError('Request body limit was crossed after the response started')
+            await self._reject(scope, receive, send)
+
+    @staticmethod
+    async def _reject(scope, receive, send):
+        response = JSONResponse(
+            status_code=413,
+            content={'detail': 'Request body exceeds the configured limit'},
+        )
+        await response(scope, receive, send)
+
+
+app.add_middleware(RequestBodyLimitMiddleware, max_body_bytes=MAX_REQUEST_BODY_BYTES)
+
+
+@app.middleware('http')
+async def authenticate_analysis_requests(request: Request, call_next):
+    """Authenticate analysis requests before FastAPI parses multipart bodies."""
+    if request.method == 'POST' and request.url.path in ANALYSIS_PATHS:
+        if not _valid_api_token(request.headers.get(TOKEN_HEADER)):
+            return JSONResponse(
+                status_code=401,
+                content={'detail': 'Invalid or missing API token'},
+                headers={'WWW-Authenticate': 'ShakeTune-Token'},
+            )
+    return await call_next(request)
+
+
+Path(RESULTS_DIR).mkdir(parents=True, exist_ok=True)
+app.mount('/results', StaticFiles(directory=RESULTS_DIR), name='results')
+
+TEMPLATES_DIR = Path(__file__).parent / 'templates'
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
-def get_all_results() -> Dict[str, Dict[str, List[Dict[str, str]]]]:
-    """Scan results directory and return structured data for all printers."""
-    results = {}
+class UploadRejected(Exception):
+    """An uploaded file cannot be processed safely."""
 
-    if not os.path.exists(RESULTS_DIR):
-        return results
-
-    # Pattern to match result files: YYYYMMDD_HHMMSS_type.png or YYYYMMDD_HHMMSS_type_axis.png
-    pattern = re.compile(r'^(\d{8}_\d{6})_(shaper|belts|vibrations)(?:_\w+)?\.png$')
-
-    for printer_name in os.listdir(RESULTS_DIR):
-        printer_path = os.path.join(RESULTS_DIR, printer_name)
-        if not os.path.isdir(printer_path):
-            continue
-
-        printer_data = {"shaper": [], "belts": [], "vibrations": []}
-
-        for filename in os.listdir(printer_path):
-            match = pattern.match(filename)
-            if match:
-                ts_str, graph_type = match.groups()
-                # Parse timestamp for display
-                try:
-                    dt = datetime.strptime(ts_str, "%Y%m%d_%H%M%S")
-                    formatted_ts = dt.strftime("%Y-%m-%d %H:%M:%S")
-                except ValueError:
-                    formatted_ts = ts_str
-
-                printer_data[graph_type].append({
-                    "file": filename,
-                    "timestamp": formatted_ts,
-                    "sort_key": ts_str
-                })
-
-        # Sort each type by timestamp (newest first)
-        for graph_type in printer_data:
-            printer_data[graph_type].sort(key=lambda x: x["sort_key"], reverse=True)
-
-        # Calculate last activity
-        all_results = printer_data["shaper"] + printer_data["belts"] + printer_data["vibrations"]
-        if all_results:
-            latest = max(all_results, key=lambda x: x["sort_key"])
-            printer_data["last_activity"] = latest["timestamp"]
-        else:
-            printer_data["last_activity"] = None
-
-        # Only include printer if it has any results
-        if any(printer_data[t] for t in ["shaper", "belts", "vibrations"]):
-            results[printer_name] = printer_data
-
-    return results
+    def __init__(self, status_code: int, detail: str):
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
 
 
-def run_graph_cli(graph_type: str, csv_paths: List[str], output_path: str, extra_args: List[str] = None) -> bool:
-    """Run the Shake&Tune CLI to generate a graph."""
+def validate_printer(printer: Optional[str]) -> str:
+    candidate = 'default' if printer is None else printer
+    if not PRINTER_PATTERN.fullmatch(candidate):
+        raise HTTPException(
+            status_code=400,
+            detail='Printer must contain 1-64 letters, numbers, underscores, or hyphens',
+        )
+    return candidate
+
+
+def validate_timestamp(timestamp: Optional[str]) -> str:
+    if timestamp is None:
+        return datetime.now().strftime('%Y%m%d_%H%M%S')
+    if not TIMESTAMP_PATTERN.fullmatch(timestamp):
+        raise HTTPException(status_code=400, detail='Timestamp must use YYYYMMDD_HHMMSS')
+    try:
+        datetime.strptime(timestamp, '%Y%m%d_%H%M%S')
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='Timestamp is not a valid date and time') from exc
+    return timestamp
+
+
+def _safe_child(root: Path, name: str) -> Path:
+    root = root.resolve()
+    child = (root / name).resolve()
+    if child.parent != root:
+        raise ValueError('Path escapes its assigned directory')
+    return child
+
+
+def _validate_upload_name(filename: Optional[str]) -> Tuple[str, str, bool]:
+    if not filename:
+        raise UploadRejected(400, 'Every upload must have a filename')
+    if filename in {'.', '..'} or '/' in filename or '\\' in filename or '\x00' in filename:
+        raise UploadRejected(400, f'Upload filename must be a basename: {filename!r}')
+    if any(ord(character) < 32 or ord(character) == 127 for character in filename):
+        raise UploadRejected(400, 'Upload filename contains control characters')
+    if len(filename.encode('utf-8')) > 255:
+        raise UploadRejected(400, 'Upload filename is too long')
+
+    is_gzip = filename.endswith('.csv.gz')
+    if is_gzip:
+        output_name = filename[:-3]
+    elif filename.endswith('.csv'):
+        output_name = filename
+    else:
+        raise UploadRejected(400, f'Upload must use a .csv or .csv.gz extension: {filename!r}')
+
+    if output_name.lower() == '.csv':
+        raise UploadRejected(400, 'Upload filename must include a name before .csv')
+    return filename, output_name, is_gzip
+
+
+def _upload_spec(upload: UploadFile) -> Tuple[str, str, bool]:
+    return _validate_upload_name(upload.filename)
+
+
+def _validate_upload_metadata(files: List[UploadFile]) -> List[Tuple[UploadFile, str, str, bool]]:
+    if not files:
+        raise UploadRejected(400, 'At least one upload is required')
+    if len(files) > MAX_UPLOAD_FILES:
+        raise UploadRejected(413, f'At most {MAX_UPLOAD_FILES} files may be uploaded at once')
+
+    specs = []
+    output_names = set()
+    for upload in files:
+        filename, output_name, is_gzip = _upload_spec(upload)
+        if output_name in output_names:
+            raise UploadRejected(400, f'Duplicate upload filename: {output_name!r}')
+        output_names.add(output_name)
+        specs.append((upload, filename, output_name, is_gzip))
+    return specs
+
+
+async def _store_upload(upload: UploadFile, destination: Path) -> int:
+    bytes_written = 0
+    with destination.open('xb') as output:
+        while True:
+            chunk = await upload.read(UPLOAD_CHUNK_SIZE)
+            if not chunk:
+                break
+            bytes_written += len(chunk)
+            if bytes_written > MAX_UPLOAD_BYTES_PER_FILE:
+                raise UploadRejected(
+                    413,
+                    f'Upload exceeds {MAX_UPLOAD_BYTES_PER_FILE} bytes before decompression',
+                )
+            output.write(chunk)
+
+    if bytes_written == 0:
+        raise UploadRejected(400, f'Upload {upload.filename!r} is empty')
+    return bytes_written
+
+
+def _decompress_gzip(source: Path, destination: Path, total_already_written: int) -> int:
+    bytes_written = 0
+    try:
+        with gzip.open(source, 'rb') as compressed, destination.open('xb') as output:
+            while True:
+                chunk = compressed.read(UPLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                bytes_written += len(chunk)
+                if bytes_written > MAX_DECOMPRESSED_BYTES_PER_FILE:
+                    raise UploadRejected(
+                        413,
+                        f'Decompressed upload exceeds {MAX_DECOMPRESSED_BYTES_PER_FILE} bytes',
+                    )
+                if total_already_written + bytes_written > MAX_TOTAL_DECOMPRESSED_BYTES:
+                    raise UploadRejected(
+                        413,
+                        f'Uploads exceed {MAX_TOTAL_DECOMPRESSED_BYTES} decompressed bytes in total',
+                    )
+                output.write(chunk)
+    except (gzip.BadGzipFile, EOFError, zlib.error) as exc:
+        destination.unlink(missing_ok=True)
+        raise UploadRejected(400, f'Upload {source.name!r} is not valid gzip data') from exc
+    except UploadRejected:
+        destination.unlink(missing_ok=True)
+        raise
+
+    if bytes_written == 0:
+        destination.unlink(missing_ok=True)
+        raise UploadRejected(400, f'Upload {source.name!r} expands to an empty file')
+    return bytes_written
+
+
+async def save_uploaded_files(files: List[UploadFile], tmpdir: str) -> List[str]:
+    """Stream uploads into a contained temp directory and expand gzip safely."""
+    try:
+        specs = _validate_upload_metadata(files)
+        root = Path(tmpdir).resolve()
+        csv_paths = []
+        total_decompressed = 0
+
+        for upload, filename, output_name, is_gzip in specs:
+            source_path = _safe_child(root, filename)
+            output_path = _safe_child(root, output_name)
+
+            await _store_upload(upload, source_path)
+            if is_gzip:
+                decompressed = await asyncio.to_thread(
+                    _decompress_gzip,
+                    source_path,
+                    output_path,
+                    total_decompressed,
+                )
+                source_path.unlink()
+            else:
+                decompressed = source_path.stat().st_size
+                if decompressed > MAX_DECOMPRESSED_BYTES_PER_FILE:
+                    raise UploadRejected(
+                        413,
+                        f'Upload exceeds {MAX_DECOMPRESSED_BYTES_PER_FILE} bytes',
+                    )
+                if total_decompressed + decompressed > MAX_TOTAL_DECOMPRESSED_BYTES:
+                    raise UploadRejected(
+                        413,
+                        f'Uploads exceed {MAX_TOTAL_DECOMPRESSED_BYTES} bytes in total',
+                    )
+
+            total_decompressed += decompressed
+            csv_paths.append(str(output_path))
+
+        return csv_paths
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='Upload path is invalid') from exc
+    except UploadRejected as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+def _bounded_process_error(result: subprocess.CompletedProcess) -> str:
+    raw_message = result.stderr or result.stdout or 'no diagnostic output'
+    return ' '.join(str(raw_message).split())[:500]
+
+
+async def run_graph_cli(
+    graph_type: str,
+    csv_paths: List[str],
+    output_path: str,
+    extra_args: Optional[List[str]] = None,
+) -> None:
+    """Run one bounded graph-analysis process without blocking the event loop."""
     cmd = [
-        "python", "-m", "shaketune.cli",
+        sys.executable,
+        '-m',
+        'shaketune.cli',
         graph_type,
-        "-k", KLIPPER_DIR,
-        "-o", output_path,
+        '-k',
+        KLIPPER_DIR,
+        '-o',
+        output_path,
     ]
     if extra_args:
         cmd.extend(extra_args)
     cmd.extend(csv_paths)
 
     env = os.environ.copy()
-    env["PYTHONPATH"] = "/app"
+    env.pop('SHAKETUNE_API_TOKEN', None)
+    env.pop('SHAKETUNE_API_TOKEN_FILE', None)
+    env['PYTHONPATH'] = APP_DIR
 
-    with tracer.start_as_current_span(
-        "analysis.run_graph_cli",
-        attributes={"analysis.type": graph_type, "analysis.file_count": len(csv_paths)},
-    ) as s:
-        result = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd="/app")
-        s.set_attribute("subprocess.returncode", result.returncode)
-        if result.returncode != 0:
-            s.set_status(trace.StatusCode.ERROR, result.stderr[:500] if result.stderr else "unknown error")
+    async with _ANALYSIS_SEMAPHORE:
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                cmd,
+                capture_output=True,
+                text=True,
+                env=env,
+                cwd=APP_DIR,
+                timeout=ANALYSIS_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise HTTPException(
+                status_code=504,
+                detail=f'Analysis timed out after {ANALYSIS_TIMEOUT_SECONDS} seconds',
+            ) from exc
+        except OSError as exc:
+            detail = ' '.join(str(exc).split())[:300]
             raise HTTPException(
                 status_code=500,
-                detail=f"Analysis failed: {result.stderr or result.stdout}"
-            )
-    return True
+                detail=f'Analysis process could not start: {detail}',
+            ) from exc
 
+    if result.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f'Analysis failed: {_bounded_process_error(result)}',
+        )
 
-async def save_uploaded_files(files: List[UploadFile], tmpdir: str) -> List[str]:
-    """Save uploaded files to temp directory and return paths.
-
-    Automatically decompresses .gz files.
-    """
-    import gzip as gzip_module
-    csv_paths = []
-    print(f"DEBUG: Received {len(files)} files")
-    for f in files:
-        print(f"DEBUG: Processing file: {f.filename}, size: {f.size}")
-        content = await f.read()
-
-        # Handle gzipped files
-        filename = f.filename
-        if filename.endswith('.gz'):
-            print(f"DEBUG: Decompressing gzipped file: {filename}")
-            content = gzip_module.decompress(content)
-            filename = filename[:-3]  # Remove .gz extension
-
-        path = os.path.join(tmpdir, filename)
-        with open(path, "wb") as out:
-            out.write(content)
-        csv_paths.append(path)
-    print(f"DEBUG: Saved files: {csv_paths}")
-    return csv_paths
+    output = Path(output_path)
+    if not output.is_file() or output.stat().st_size == 0:
+        raise HTTPException(status_code=500, detail='Analysis produced no graph output')
 
 
 def get_printer_dir(printer: str) -> str:
-    """Get or create printer-specific results directory."""
-    printer_dir = os.path.join(RESULTS_DIR, printer)
-    os.makedirs(printer_dir, exist_ok=True)
-    return printer_dir
+    """Get or create a contained printer-specific results directory."""
+    root = Path(RESULTS_DIR).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        printer_dir = _safe_child(root, printer)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='Printer path is invalid') from exc
+    printer_dir.mkdir(exist_ok=True)
+    return str(printer_dir)
 
 
-@app.post("/shaper")
-async def analyze_shaper(
-    files: Optional[List[UploadFile]] = File(default=None),
-    file_x: Optional[UploadFile] = File(default=None),
-    file_y: Optional[UploadFile] = File(default=None),
-    printer: Optional[str] = Form(default="default"),
-    timestamp: Optional[str] = Form(default=None),
-    max_freq: Optional[float] = Form(default=200.0),
-    scv: Optional[float] = Form(default=5.0)
-):
-    """
-    Analyze resonance data and generate input shaper calibration graph.
-
-    Upload raw accelerometer CSV files from TEST_RESONANCES commands.
-    Accepts either:
-    - files: multiple files with same field name (standard curl)
-    - file_x and file_y: separate fields (for BusyBox curl compatibility)
-    Optional 'printer' parameter to organize results by printer name.
-    Optional 'timestamp' parameter for predictable URLs (format: YYYYMMDD_HHMMSS).
-    Returns URL to the generated analysis graph.
-    """
-    ts = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
-    printer_dir = get_printer_dir(printer)
-
-    # Build file list from either 'files' array or individual file_x/file_y params
-    upload_files = []
-    if files:
-        upload_files.extend(files)
-    if file_x:
-        upload_files.append(file_x)
-    if file_y:
-        upload_files.append(file_y)
-
-    if len(upload_files) < 1:
+def _axis_from_filename(filename: str) -> str:
+    try:
+        _, output_name, _ = _validate_upload_name(filename)
+    except UploadRejected as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    stem = output_name[:-4]
+    axis = re.split(r'[_.-]+', stem.lower())[-1]
+    if axis not in {'x', 'y'}:
         raise HTTPException(
             status_code=400,
-            detail=f"Shaper analysis requires at least 1 file. Received {len(upload_files)} file(s)."
+            detail=f'Shaper filename must end with an x or y axis label: {filename!r}',
         )
+    return axis
 
+
+def _collect_optional_uploads(*groups: Any) -> List[UploadFile]:
+    uploads = []
+    for group in groups:
+        if isinstance(group, list):
+            uploads.extend(group)
+        elif group is not None:
+            uploads.append(group)
+    return uploads
+
+
+@app.post('/shaper')
+async def analyze_shaper(
+    files: Annotated[Optional[List[UploadFile]], File()] = None,
+    file_x: Annotated[Optional[UploadFile], File()] = None,
+    file_y: Annotated[Optional[UploadFile], File()] = None,
+    printer: Annotated[Optional[str], Form()] = 'default',
+    timestamp: Annotated[Optional[str], Form()] = None,
+    max_freq: Annotated[float, Form()] = 200.0,
+    scv: Annotated[float, Form()] = 5.0,
+):
+    """Generate one input-shaper graph per uploaded X or Y resonance file."""
+    printer_name = validate_printer(printer)
+    ts = validate_timestamp(timestamp)
+    upload_files = _collect_optional_uploads(files, file_x, file_y)
+
+    if not upload_files:
+        raise HTTPException(status_code=400, detail='Shaper analysis requires at least 1 file. Received 0 file(s).')
+    if len(upload_files) > MAX_UPLOAD_FILES:
+        raise HTTPException(status_code=413, detail=f'At most {MAX_UPLOAD_FILES} files may be uploaded at once')
+
+    axes = []
+    for upload in upload_files:
+        axis = _axis_from_filename(upload.filename or '')
+        if axis in axes:
+            raise HTTPException(status_code=400, detail=f'Duplicate shaper axis: {axis}')
+        axes.append(axis)
+
+    printer_dir = get_printer_dir(printer_name)
     with tempfile.TemporaryDirectory() as tmpdir:
         csv_paths = await save_uploaded_files(upload_files, tmpdir)
-        extra_args = ["--max_freq", str(max_freq), "--scv", str(scv)]
-
-        # The shaketune CLI only processes one axis per invocation, so run
-        # each CSV separately and return per-axis results.
+        extra_args = ['--max_freq', str(max_freq), '--scv', str(scv)]
         results = []
-        for csv_path in csv_paths:
-            # Derive axis label from filename (e.g. raw_data_x_x.csv -> x)
-            basename = os.path.basename(csv_path).lower()
-            if "_x_" in basename or "_x." in basename or basename.startswith("x"):
-                axis = "x"
-            elif "_y_" in basename or "_y." in basename or basename.startswith("y"):
-                axis = "y"
-            else:
-                axis = os.path.splitext(basename)[0].split("_")[-1]
 
-            output_png = os.path.join(tmpdir, f"shaper_{axis}.png")
-            run_graph_cli("input_shaper", [csv_path], output_png, extra_args)
+        for index, csv_path in enumerate(csv_paths):
+            axis = axes[index]
+            output_png = os.path.join(tmpdir, f'shaper_{axis}.png')
+            await run_graph_cli('input_shaper', [csv_path], output_png, extra_args)
 
-            final_name = f"{ts}_shaper_{axis}.png"
+            final_name = f'{ts}_shaper_{axis}.png'
             final_path = os.path.join(printer_dir, final_name)
             shutil.move(output_png, final_path)
-            results.append({"url": f"/results/{printer}/{final_name}", "axis": axis})
+            results.append({'url': f'/results/{printer_name}/{final_name}', 'axis': axis})
 
-    return {"urls": results, "type": "shaper", "printer": printer}
+    return {'urls': results, 'type': 'shaper', 'printer': printer_name}
 
 
-@app.post("/belts")
+@app.post('/belts')
 async def analyze_belts(
-    files: Optional[List[UploadFile]] = File(default=None),
-    file_a: Optional[UploadFile] = File(default=None),
-    file_b: Optional[UploadFile] = File(default=None),
-    printer: Optional[str] = Form(default="default"),
-    timestamp: Optional[str] = Form(default=None),
-    max_freq: Optional[float] = Form(default=200.0)
+    files: Annotated[Optional[List[UploadFile]], File()] = None,
+    file_a: Annotated[Optional[UploadFile], File()] = None,
+    file_b: Annotated[Optional[UploadFile], File()] = None,
+    printer: Annotated[Optional[str], Form()] = 'default',
+    timestamp: Annotated[Optional[str], Form()] = None,
+    max_freq: Annotated[float, Form()] = 200.0,
 ):
-    """
-    Analyze belt tension data and generate comparison graph.
+    """Generate a comparison graph from exactly two belt resonance files."""
+    printer_name = validate_printer(printer)
+    ts = validate_timestamp(timestamp)
+    upload_files = _collect_optional_uploads(files, file_a, file_b)
 
-    Upload raw accelerometer CSV files from belt resonance tests.
-    Accepts either:
-    - files: multiple files with same field name (standard curl)
-    - file_a and file_b: separate fields (for BusyBox curl compatibility)
-    Optional 'printer' parameter to organize results by printer name.
-    Optional 'timestamp' parameter for predictable URLs (format: YYYYMMDD_HHMMSS).
-    Returns URL to the generated belt comparison graph.
-    """
-    ts = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
-    printer_dir = get_printer_dir(printer)
-
-    # Build file list from either 'files' array or individual file_a/file_b params
-    upload_files = []
-    if files:
-        upload_files.extend(files)
-    if file_a:
-        upload_files.append(file_a)
-    if file_b:
-        upload_files.append(file_b)
-
-    if len(upload_files) < 2:
+    if len(upload_files) != 2:
         raise HTTPException(
             status_code=400,
-            detail=f"Belt analysis requires 2 files. Received {len(upload_files)} file(s)."
+            detail=f'Belt analysis requires 2 files. Received {len(upload_files)} file(s).',
         )
 
+    printer_dir = get_printer_dir(printer_name)
     with tempfile.TemporaryDirectory() as tmpdir:
         csv_paths = await save_uploaded_files(upload_files, tmpdir)
-        output_png = os.path.join(tmpdir, "belts.png")
+        output_png = os.path.join(tmpdir, 'belts.png')
+        await run_graph_cli('belts', csv_paths, output_png, ['--max_freq', str(max_freq)])
 
-        extra_args = ["--max_freq", str(max_freq)]
-        run_graph_cli("belts", csv_paths, output_png, extra_args)
-
-        final_name = f"{ts}_belts.png"
+        final_name = f'{ts}_belts.png'
         final_path = os.path.join(printer_dir, final_name)
         shutil.move(output_png, final_path)
 
-    return {"url": f"/results/{printer}/{final_name}", "type": "belts", "printer": printer}
+    return {'url': f'/results/{printer_name}/{final_name}', 'type': 'belts', 'printer': printer_name}
 
 
-@app.post("/vibrations")
+@app.post('/vibrations')
 async def analyze_vibrations(
-    files: List[UploadFile] = File(...),
-    printer: Optional[str] = Form(default="default"),
-    timestamp: Optional[str] = Form(default=None),
-    kinematics: Optional[str] = Form(default="corexy"),
-    max_freq: Optional[float] = Form(default=1000.0)
+    files: Annotated[List[UploadFile], File()],
+    printer: Annotated[Optional[str], Form()] = 'default',
+    timestamp: Annotated[Optional[str], Form()] = None,
+    kinematics: Annotated[str, Form()] = 'corexy',
+    max_freq: Annotated[float, Form()] = 1000.0,
 ):
-    """
-    Analyze vibration data across speeds and generate analysis graph.
+    """Generate a vibration graph from one or more measurement files."""
+    printer_name = validate_printer(printer)
+    ts = validate_timestamp(timestamp)
+    if len(files) > MAX_UPLOAD_FILES:
+        raise HTTPException(status_code=413, detail=f'At most {MAX_UPLOAD_FILES} files may be uploaded at once')
 
-    Upload raw accelerometer CSV files from vibration measurements.
-    Optional 'printer' parameter to organize results by printer name.
-    Optional 'timestamp' parameter for predictable URLs (format: YYYYMMDD_HHMMSS).
-    Returns URL to the generated vibration analysis graph.
-    """
-    ts = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
-    printer_dir = get_printer_dir(printer)
-
+    printer_dir = get_printer_dir(printer_name)
     with tempfile.TemporaryDirectory() as tmpdir:
         csv_paths = await save_uploaded_files(files, tmpdir)
-        output_png = os.path.join(tmpdir, "vibrations.png")
+        output_png = os.path.join(tmpdir, 'vibrations.png')
+        extra_args = ['--max_freq', str(max_freq), '--kinematics', str(kinematics)]
+        await run_graph_cli('vibrations', csv_paths, output_png, extra_args)
 
-        extra_args = ["--max_freq", str(max_freq), "--kinematics", kinematics]
-        run_graph_cli("vibrations", csv_paths, output_png, extra_args)
-
-        final_name = f"{ts}_vibrations.png"
+        final_name = f'{ts}_vibrations.png'
         final_path = os.path.join(printer_dir, final_name)
         shutil.move(output_png, final_path)
 
-    return {"url": f"/results/{printer}/{final_name}", "type": "vibrations", "printer": printer}
+    return {'url': f'/results/{printer_name}/{final_name}', 'type': 'vibrations', 'printer': printer_name}
 
 
-@app.get("/health")
+@app.get('/health')
 async def health():
-    """Health check endpoint."""
-    return {"status": "ok", "service": "shaketune-service"}
+    """Report that the HTTP process is accepting requests."""
+    return {'status': 'ok', 'service': 'shaketune-service'}
 
 
-def get_latest_file(graph_type: str, printer: str = "default") -> Optional[str]:
-    """Find the most recent graph file of the given type for a printer.
+def get_all_results() -> Dict[str, Dict[str, Any]]:
+    """Scan the results directory and return structured printer data."""
+    results = {}
+    root = Path(RESULTS_DIR)
+    if not root.exists():
+        return results
 
-    Matches filenames like TS_shaper.png, TS_shaper_x.png, TS_belts.png, etc.
-    """
-    try:
-        printer_dir = os.path.join(RESULTS_DIR, printer)
-        if not os.path.exists(printer_dir):
-            return None
-        pattern = re.compile(rf'^\d{{8}}_\d{{6}}_{re.escape(graph_type)}(_\w+)?\.png$')
-        files = [f for f in os.listdir(printer_dir) if pattern.match(f)]
-        if not files:
-            return None
-        # Files are named with timestamp prefix, so sorting gives chronological order
-        files.sort(reverse=True)
-        return files[0]
-    except Exception:
+    for printer_path in root.iterdir():
+        if not printer_path.is_dir() or printer_path.is_symlink():
+            continue
+
+        printer_data: Dict[str, Any] = {'shaper': [], 'belts': [], 'vibrations': []}
+        for result_path in printer_path.iterdir():
+            if not result_path.is_file() or result_path.is_symlink():
+                continue
+            match = RESULT_PATTERN.match(result_path.name)
+            if not match:
+                continue
+            ts_str, graph_type = match.groups()
+            try:
+                formatted_ts = datetime.strptime(ts_str, '%Y%m%d_%H%M%S').strftime('%Y-%m-%d %H:%M:%S')
+            except ValueError:
+                formatted_ts = ts_str
+            printer_data[graph_type].append(
+                {'file': result_path.name, 'timestamp': formatted_ts, 'sort_key': ts_str},
+            )
+
+        for graph_type in ('shaper', 'belts', 'vibrations'):
+            printer_data[graph_type].sort(key=lambda item: item['sort_key'], reverse=True)
+
+        all_results = printer_data['shaper'] + printer_data['belts'] + printer_data['vibrations']
+        printer_data['last_activity'] = max(all_results, key=lambda item: item['sort_key'])['timestamp'] if all_results else None
+        if all_results:
+            results[printer_path.name] = printer_data
+
+    return results
+
+
+def get_latest_file(graph_type: str, printer: str = 'default') -> Optional[str]:
+    """Find the most recent graph file of a given type for one printer."""
+    printer_name = validate_printer(printer)
+    printer_dir = Path(RESULTS_DIR) / printer_name
+    if not printer_dir.exists() or not printer_dir.is_dir() or printer_dir.is_symlink():
         return None
+    pattern = re.compile(rf'^\d{{8}}_\d{{6}}_{re.escape(graph_type)}(_\w+)?\.png$')
+    files = sorted(
+        (
+            path.name
+            for path in printer_dir.iterdir()
+            if path.is_file() and not path.is_symlink() and pattern.match(path.name)
+        ),
+        reverse=True,
+    )
+    return files[0] if files else None
 
 
-@app.get("/latest/{printer}/{graph_type}")
+@app.get('/latest/{printer}/{graph_type}')
 async def latest_graph_for_printer(printer: str, graph_type: str):
-    """
-    Redirect to the most recent graph of the specified type for a printer.
-
-    Supported types: shaper, belts, vibrations
-    """
-    if graph_type not in ["shaper", "belts", "vibrations"]:
-        raise HTTPException(status_code=400, detail=f"Invalid graph type: {graph_type}")
-
-    latest = get_latest_file(graph_type, printer)
+    """Redirect to one printer's most recent graph of a supported type."""
+    if graph_type not in {'shaper', 'belts', 'vibrations'}:
+        raise HTTPException(status_code=400, detail=f'Invalid graph type: {graph_type}')
+    printer_name = validate_printer(printer)
+    latest = get_latest_file(graph_type, printer_name)
     if not latest:
-        raise HTTPException(status_code=404, detail=f"No {graph_type} graphs found for printer '{printer}'")
+        raise HTTPException(status_code=404, detail=f"No {graph_type} graphs found for printer '{printer_name}'")
+    return RedirectResponse(url=f'/results/{printer_name}/{latest}', status_code=302)
 
-    return RedirectResponse(url=f"/results/{printer}/{latest}", status_code=302)
 
-
-@app.get("/latest/{graph_type}")
+@app.get('/latest/{graph_type}')
 async def latest_graph(graph_type: str):
-    """
-    Redirect to the most recent graph of the specified type (default printer).
-
-    Supported types: shaper, belts, vibrations
-    """
-    if graph_type not in ["shaper", "belts", "vibrations"]:
-        raise HTTPException(status_code=400, detail=f"Invalid graph type: {graph_type}")
-
-    latest = get_latest_file(graph_type, "default")
+    """Redirect to the default printer's most recent graph of a supported type."""
+    if graph_type not in {'shaper', 'belts', 'vibrations'}:
+        raise HTTPException(status_code=400, detail=f'Invalid graph type: {graph_type}')
+    latest = get_latest_file(graph_type)
     if not latest:
-        raise HTTPException(status_code=404, detail=f"No {graph_type} graphs found")
+        raise HTTPException(status_code=404, detail=f'No {graph_type} graphs found')
+    return RedirectResponse(url=f'/results/default/{latest}', status_code=302)
 
-    return RedirectResponse(url=f"/results/default/{latest}", status_code=302)
 
-
-@app.get("/", response_class=HTMLResponse)
+@app.get('/', response_class=HTMLResponse)
 async def home(request: Request):
-    """Dashboard home page showing all printers."""
-    printers = get_all_results()
-    return templates.TemplateResponse(request, "home.html", {
-        "printers": printers
-    })
+    """Render the dashboard home page."""
+    return templates.TemplateResponse(request, 'home.html', {'printers': get_all_results()})
 
 
-@app.get("/printer/{printer_name}", response_class=HTMLResponse)
+@app.get('/printer/{printer_name}', response_class=HTMLResponse)
 async def printer_detail(request: Request, printer_name: str):
-    """Printer detail page showing all results."""
+    """Render all available results for one printer."""
+    printer_name = validate_printer(printer_name)
     all_results = get_all_results()
 
     if printer_name not in all_results:
-        # Check if printer directory exists but is empty
-        printer_path = os.path.join(RESULTS_DIR, printer_name)
-        if os.path.isdir(printer_path):
-            results = {"shaper": [], "belts": [], "vibrations": []}
+        printer_path = Path(RESULTS_DIR) / printer_name
+        if printer_path.is_dir() and not printer_path.is_symlink():
+            results = {'shaper': [], 'belts': [], 'vibrations': []}
         else:
             raise HTTPException(status_code=404, detail=f"Printer '{printer_name}' not found")
     else:
         results = all_results[printer_name]
 
-    return templates.TemplateResponse(request, "printer.html", {
-        "printer_name": printer_name,
-        "results": results
-    })
+    return templates.TemplateResponse(
+        request,
+        'printer.html',
+        {'printer_name': printer_name, 'results': results},
+    )
 
 
-@app.get("/api")
+@app.get('/api')
 async def api_docs():
-    """API documentation."""
+    """Return concise API usage information."""
     return {
-        "service": "Shake&Tune Analysis Service",
-        "version": "1.1.0",
-        "description": "Process Klipper accelerometer data for input shaper calibration",
-        "endpoints": {
-            "POST /shaper": "Upload resonance CSVs, get input shaper graph (optional: printer=name)",
-            "POST /belts": "Upload belt test CSVs, get belt comparison graph (optional: printer=name)",
-            "POST /vibrations": "Upload vibration CSVs, get speed analysis graph (optional: printer=name)",
-            "GET /results/{printer}/{filename}": "Retrieve generated graph",
-            "GET /latest/{printer}/{type}": "Redirect to printer's latest graph",
-            "GET /latest/{type}": "Redirect to latest graph (default printer)",
-            "GET /health": "Health check",
-            "GET /": "Web dashboard",
-            "GET /printer/{name}": "Printer results page",
+        'service': 'Shake&Tune Analysis Service',
+        'version': '1.2.0',
+        'description': 'Process Klipper accelerometer data for input shaper calibration',
+        'authentication': f'POST endpoints require the {TOKEN_HEADER} header',
+        'endpoints': {
+            'POST /shaper': 'Upload resonance CSVs, get input shaper graphs',
+            'POST /belts': 'Upload two belt CSVs, get a comparison graph',
+            'POST /vibrations': 'Upload vibration CSVs, get a speed analysis graph',
+            'GET /results/{printer}/{filename}': 'Retrieve a generated graph',
+            'GET /latest/{printer}/{type}': "Redirect to a printer's latest graph",
+            'GET /latest/{type}': 'Redirect to the default printer latest graph',
+            'GET /health': 'Health check',
+            'GET /': 'Web dashboard',
+            'GET /printer/{name}': 'Printer results page',
         },
-        "usage": {
-            "single_printer": 'curl -X POST http://host:3080/shaper -F "files=@x.csv" -F "files=@y.csv"',
-            "multi_printer": 'curl -X POST http://host:3080/shaper -F "files=@x.csv" -F "files=@y.csv" -F "printer=k1v3"',
-        }
     }

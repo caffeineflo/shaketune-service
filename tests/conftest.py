@@ -1,20 +1,34 @@
 import gzip
-import os
+import importlib
 import subprocess
-import tempfile
 from pathlib import Path
-
-# Set env vars BEFORE importing server module (it runs os.makedirs at import time)
-_test_results_dir = tempfile.mkdtemp(prefix='shaketune_test_')
-os.environ['RESULTS_DIR'] = _test_results_dir
-os.environ['KLIPPER_DIR'] = '/tmp/fake-klipper'
-os.environ['SHAKETUNE_DIR'] = '/tmp/fake-shaketune'
 
 import pytest
 from starlette.testclient import TestClient
 
-from service import server
-from service.server import app
+TEST_API_TOKEN = 'test-token'
+AUTH_HEADERS = {'X-ShakeTune-Token': TEST_API_TOKEN}
+
+
+@pytest.fixture(scope='session')
+def server_module(tmp_path_factory):
+    """Import the service after installing a safe, isolated test configuration."""
+    environment = pytest.MonkeyPatch()
+    environment.setenv('RESULTS_DIR', str(tmp_path_factory.mktemp('shaketune_results')))
+    environment.setenv('KLIPPER_DIR', '/tmp/fake-klipper')
+    environment.setenv('APP_DIR', '/app')
+    environment.setenv('SHAKETUNE_API_TOKEN', TEST_API_TOKEN)
+    environment.setenv('SHAKETUNE_ANALYSIS_TIMEOUT_SECONDS', '300')
+    environment.setenv('SHAKETUNE_ANALYSIS_CONCURRENCY', '1')
+    environment.setenv('SHAKETUNE_MAX_UPLOAD_FILES', '16')
+    environment.setenv('SHAKETUNE_MAX_UPLOAD_BYTES', str(32 * 1024 * 1024))
+    environment.setenv('SHAKETUNE_MAX_DECOMPRESSED_BYTES', str(64 * 1024 * 1024))
+    environment.setenv('SHAKETUNE_MAX_TOTAL_DECOMPRESSED_BYTES', str(128 * 1024 * 1024))
+    environment.setenv('SHAKETUNE_MAX_REQUEST_BODY_BYTES', str(64 * 1024 * 1024))
+    environment.delenv('SHAKETUNE_API_TOKEN_FILE', raising=False)
+    module = importlib.import_module('service.server')
+    yield module
+    environment.undo()
 
 
 @pytest.fixture()
@@ -26,15 +40,23 @@ def results_dir(tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def _patch_results_dir(monkeypatch, results_dir):
+def _patch_results_dir(monkeypatch, results_dir, server_module):
     """Redirect RESULTS_DIR to per-test tmp dir for all tests."""
-    monkeypatch.setattr(server, 'RESULTS_DIR', str(results_dir))
+    monkeypatch.setattr(server_module, 'RESULTS_DIR', str(results_dir))
 
 
 @pytest.fixture()
-def client():
+def client(server_module):
     """FastAPI test client."""
-    return TestClient(app)
+    with TestClient(server_module.app, headers=AUTH_HEADERS) as test_client:
+        yield test_client
+
+
+@pytest.fixture()
+def unauthenticated_client(server_module):
+    """FastAPI test client without the analysis API token."""
+    with TestClient(server_module.app) as test_client:
+        yield test_client
 
 
 def make_csv_bytes(num_rows=100):
@@ -52,7 +74,7 @@ def make_gzip_csv(num_rows=100):
 
 
 @pytest.fixture()
-def mock_cli(monkeypatch):
+def mock_cli(monkeypatch, server_module):
     """Mock subprocess.run to simulate successful CLI graph generation.
 
     Creates a fake PNG file at the -o output path so shutil.move succeeds.
@@ -70,18 +92,18 @@ def mock_cli(monkeypatch):
                 break
         return subprocess.CompletedProcess(cmd, 0, stdout='...done!', stderr='')
 
-    monkeypatch.setattr('subprocess.run', fake_run)
+    monkeypatch.setattr(server_module.subprocess, 'run', fake_run)
     return calls
 
 
 @pytest.fixture()
-def mock_cli_failure(monkeypatch):
+def mock_cli_failure(monkeypatch, server_module):
     """Mock subprocess.run to simulate CLI failure."""
 
     def fake_run(cmd, **kwargs):
         return subprocess.CompletedProcess(cmd, 1, stdout='', stderr='Analysis error: bad data')
 
-    monkeypatch.setattr('subprocess.run', fake_run)
+    monkeypatch.setattr(server_module.subprocess, 'run', fake_run)
 
 
 def create_result_file(results_dir, printer, filename):
