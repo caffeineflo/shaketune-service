@@ -530,6 +530,7 @@ async def analyze_belts(
     printer: Annotated[Optional[str], Form()] = 'default',
     timestamp: Annotated[Optional[str], Form()] = None,
     max_freq: Annotated[float, Form()] = 200.0,
+    kinematics: Annotated[str, Form()] = 'corexy',
 ):
     """Generate a comparison graph from exactly two belt resonance files."""
     printer_name = validate_printer(printer)
@@ -546,7 +547,8 @@ async def analyze_belts(
     with tempfile.TemporaryDirectory() as tmpdir:
         csv_paths = await save_uploaded_files(upload_files, tmpdir)
         output_png = os.path.join(tmpdir, 'belts.png')
-        await run_graph_cli('belts', csv_paths, output_png, ['--max_freq', str(max_freq)])
+        extra_args = ['--max_freq', str(max_freq), '--kinematics', kinematics]
+        await run_graph_cli('belts', csv_paths, output_png, extra_args)
 
         final_name = f'{ts}_belts.png'
         final_path = os.path.join(printer_dir, final_name)

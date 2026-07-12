@@ -17,14 +17,19 @@ This keeps the two raw-data sweeps out of one Klipper command lifecycle. Shaper 
 
 ## Live validation
 
-The production workflow completed two full X/Y shaper cycles per printer on 2026-07-12:
+The production workflow completed five full X/Y shaper cycles on 2026-07-12:
 
-- K1v3: `20260712_133847` ([X](http://shaketune.iflorian.com:3080/results/k1v3/20260712_133847_shaper_x.png), [Y](http://shaketune.iflorian.com:3080/results/k1v3/20260712_133847_shaper_y.png)) and `20260712_141742` ([X](http://shaketune.iflorian.com:3080/results/k1v3/20260712_141742_shaper_x.png), [Y](http://shaketune.iflorian.com:3080/results/k1v3/20260712_141742_shaper_y.png))
+- K1v3: `20260712_133847` ([X](http://shaketune.iflorian.com:3080/results/k1v3/20260712_133847_shaper_x.png), [Y](http://shaketune.iflorian.com:3080/results/k1v3/20260712_133847_shaper_y.png)), `20260712_141742` ([X](http://shaketune.iflorian.com:3080/results/k1v3/20260712_141742_shaper_x.png), [Y](http://shaketune.iflorian.com:3080/results/k1v3/20260712_141742_shaper_y.png)), and the controlled tie-break `20260712_164316` ([X](http://shaketune.iflorian.com:3080/results/k1v3/20260712_164316_shaper_x.png), [Y](http://shaketune.iflorian.com:3080/results/k1v3/20260712_164316_shaper_y.png))
 - K1v4: `20260712_134753` ([X](http://shaketune.iflorian.com:3080/results/k1v4/20260712_134753_shaper_x.png), [Y](http://shaketune.iflorian.com:3080/results/k1v4/20260712_134753_shaper_y.png)) and `20260712_142621` ([X](http://shaketune.iflorian.com:3080/results/k1v4/20260712_142621_shaper_x.png), [Y](http://shaketune.iflorian.com:3080/results/k1v4/20260712_142621_shaper_y.png))
 
-The final belt workflow also completed on [K1v3](http://shaketune.iflorian.com:3080/results/k1v3/20260712_144333_belts.png) and [K1v4](http://shaketune.iflorian.com:3080/results/k1v4/20260712_145249_belts.png). All eight shaper graphs are valid 2250x1740 PNGs, and both belt graphs are valid 2250x1050 PNGs. Each printer finished in `standby` with heater targets at zero, cleared raw files and locks, and recorded the expected firmware restarts.
+All ten shaper graphs are valid 2250x1740 PNGs. K1v3 X initially measured 57.4 Hz, but the later two cycles clustered at 65.3 and 63.6 Hz with MZV recommendations of 65.8 and 64.2 Hz. Its first X result was an outlier; the current MZV 66.9 Hz setting remains close enough that no live change was made. K1v3 Y is stable. K1v4 Y is also stable around 60 Hz, but K1v4 X repeatably shows 22-24, 71-72, and 97 Hz modes with 22.9-23.8% residual vibration under MZV. That axis needs mechanical inspection before retuning.
 
-This proves repeatability across those two shaper cycles and one belt cycle per printer. It isn't a guarantee that future hardware, firmware, network, or service changes can't fail.
+The first belt graphs exposed three analysis defects: the offset table compared Belt A with itself, `/belts` omitted CoreXY kinematics, and uploaded A/B filenames were labeled as `data`. Regression-covered fixes were deployed before these replacement belt runs:
+
+- [K1v3 corrected belt graph](http://shaketune.iflorian.com:3080/results/k1v3/20260712_170511_belts.png): 99.4% similarity, 0.0 Hz frequency delta, 8.5% amplitude delta, zero unpaired peaks, and `Excellent mechanical health`
+- [K1v4 corrected belt graph](http://shaketune.iflorian.com:3080/results/k1v4/20260712_171449_belts.png): 99.6% similarity, 0.0 Hz frequency delta, 0.7% amplitude delta, zero unpaired peaks, and `Excellent mechanical health`
+
+Both corrected belt graphs are valid 2250x1050 PNGs. Every final run ended in `standby` with heater targets at zero, cleared raw files and locks, and recorded both verified firmware restarts. The repeated workflows establish current end-to-end reliability, but they don't guarantee that future hardware, firmware, network, or service changes can't fail. Relative belt graphs also don't establish absolute belt tension.
 
 ## Authentication
 
@@ -70,7 +75,7 @@ See [service/README.md](./service/README.md) for the full service, multi-printer
 | Endpoint | Authentication | Description |
 |----------|----------------|-------------|
 | `POST /shaper` | `X-ShakeTune-Token` | Upload one or more axis CSVs and generate input shaper graphs |
-| `POST /belts` | `X-ShakeTune-Token` | Upload two belt CSVs and generate a comparison graph |
+| `POST /belts` | `X-ShakeTune-Token` | Upload two belt CSVs and generate a comparison graph; `kinematics` defaults to `corexy` |
 | `POST /vibrations` | `X-ShakeTune-Token` | Upload a vibration CSV and generate a vibration graph |
 | `GET /latest/{printer}/{type}` | None | Redirect to a printer's most recent graph of the requested type |
 | `GET /results/{printer}/{file}` | None | Read a generated graph |

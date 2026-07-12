@@ -156,6 +156,8 @@ All POST endpoints accept multipart form data with these common fields:
 - `printer`: a stable printer name containing letters, numbers, underscores, or hyphens
 - `timestamp`: an optional client timestamp in `YYYYMMDD_HHMMSS` format
 
+The `/belts` endpoint also accepts `kinematics`, which defaults to `corexy`. Passing the kinematics through to Shake&Tune enables its similarity and experimental mechanical-health calculations for supported CoreXY and CoreXZ variants.
+
 Upload files must use `.csv` or `.csv.gz`. The service caps the aggregate incoming request body at 64 MiB by default, including multipart framing and chunked requests, before temporary multipart storage can exceed that limit. Set `SHAKETUNE_MAX_REQUEST_BODY_BYTES` to a positive byte count to change the cap. It also enforces per-file compressed and expanded size limits and serializes heavy analysis by default.
 
 The service analysis timeout is 300 seconds by default. Official K1 upload scripts allow 360 seconds so a valid server-side analysis can finish before the client gives up.

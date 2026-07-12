@@ -61,10 +61,15 @@ class BeltsComputation:
 
         # Get belt names for labels
         belt_info = {'A': ' (axis 1,-1)', 'B': ' (axis 1, 1)'}
-        signal1_belt = self.measurements[0]['name'].split('_')[1]
-        signal2_belt = self.measurements[1]['name'].split('_')[1]
-        signal1_belt += belt_info.get(signal1_belt, '')
-        signal2_belt += belt_info.get(signal2_belt, '')
+        signal_belts = []
+        for measurement in self.measurements:
+            name_parts = measurement['name'].split('_')
+            belt = name_parts[1]
+            suffix = name_parts[-1].upper()
+            if suffix in belt_info:
+                belt = suffix
+            signal_belts.append(belt + belt_info.get(belt, ''))
+        signal1_belt, signal2_belt = signal_belts
 
         # Compute calibration data
         common_freqs = np.linspace(0, self.max_freq, 500)
